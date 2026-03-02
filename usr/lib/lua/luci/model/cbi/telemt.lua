@@ -1,6 +1,6 @@
 -- ==============================================================================
 -- Telemt CBI Model (Configuration Binding Interface)
--- Version: 3.1.4-12 (Epoch 1) - BULLETPROOF AJAX, NO EMOJI, NATIVE BUTTONS
+-- Version: 3.1.4-14 (Epoch 1) - AUTO-RESUME, SMART STATUSES, HARDCODED RESET
 -- ==============================================================================
 
 local sys = require "luci.sys"
@@ -54,6 +54,18 @@ if is_post and http.formvalue("auto_pause_user") then
         sys.call(string.format("logger -t telemt 'WebUI: Auto-paused user %s (Reason: %s)'", u, reason))
         sys.call("/etc/init.d/telemt reload >/dev/null 2>&1 &")
     end
+    http.prepare_content("text/plain")
+    pcall(function() http.write("ok") end)
+    end_ajax(); return
+end
+
+if is_post and http.formvalue("reset_config") == "1" then
+    sys.call("logger -t telemt 'WebUI: FACTORY RESET ALL SETTINGS'")
+    local default_uci = "config telemt 'general'\n\toption enabled '0'\n\toption mode 'tls'\n\toption domain 'google.com'\n\toption port '4443'\n\toption metrics_port '9091'\n\toption metrics_allow_lo '1'\n\toption metrics_allow_lan '1'\n\toption log_level 'normal'\n"
+    local f = io.open("/etc/config/telemt", "w")
+    if f then f:write(default_uci); f:close() end
+    sys.call("rm -f /var/etc/telemt.toml")
+    sys.call("/etc/init.d/telemt stop 2>/dev/null")
     http.prepare_content("text/plain")
     pcall(function() http.write("ok") end)
     end_ajax(); return
@@ -115,8 +127,7 @@ if http.formvalue("get_scanners") == "1" then
 end
 
 if http.formvalue("get_log") == "1" then
-    local cmd = "logread -e 'telemt' | tail -n 50 2>/dev/null"
-    if has_cmd("timeout") then cmd = "timeout 2 " .. cmd end
+    local cmd = "logread | grep -i 'telemt' | tail -n 50 2>/dev/null"
     local log_data = sys.exec(cmd); if not log_data or log_data:gsub("%s+", "") == "" then log_data = "No logs found." end
     http.prepare_content("text/plain")
     pcall(function() http.write(log_data:gsub("\27%[[%d;]*m", "")) end)
@@ -192,7 +203,7 @@ if not is_ajax then
     else bin_info = string.format("<small style='opacity: 0.6;'>%s (v%s)</small>", bin_path, (read_file("/var/etc/telemt.version"):gsub("%s+", "")) == "" and "unknown" or (read_file("/var/etc/telemt.version"):gsub("%s+", ""))) end
 end
 
-m = Map("telemt", "Telegram Proxy (MTProto)", [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.1.4-12</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.0.15+</span>]])
+m = Map("telemt", "Telegram Proxy (MTProto)", [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.1.4-14</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.0.15+</span>]])
 m.on_commit = function(self) sys.call("logger -t telemt 'WebUI: Config saved. Dumping stats before procd reload...'; /etc/init.d/telemt run_save_stats 2>/dev/null") end
 
 s = m:section(NamedSection, "general", "telemt")
@@ -353,7 +364,7 @@ local bc = s:taboption("bot", Value, "bot_chat_id", "Admin Chat ID" .. tip("Your
 
 -- === TAB: DIAGNOSTICS ===
 local lv = s:taboption("log", DummyValue, "_lv"); lv.rawhtml = true
-lv.default = [[<div style="width:100%; box-sizing:border-box; height:500px; font-family:monospace; font-size:12px; padding:12px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #333; border-radius: 4px; overflow-y:auto; overflow-x:auto; white-space:pre;" id="telemt_log_container">Click a button below to load data.</div><div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;"><input type="button" class="cbi-button cbi-button-apply" id="btn_load_log" value="System Log" /><input type="button" class="cbi-button cbi-button-reset" id="btn_load_scanners" value="Show Active Scanners" /><input type="button" class="cbi-button cbi-button-action" id="btn_copy_log" value="Copy Output" /><input type="button" class="cbi-button cbi-button-neural" id="btn_export_config" value="Export active config" style="background:#4a90e2; color:#fff; border:1px solid #357abd;" /></div><script>setTimeout(function(){ document.getElementById('btn_load_log').addEventListener('click', loadLog); document.getElementById('btn_load_scanners').addEventListener('click', loadScanners); document.getElementById('btn_copy_log').addEventListener('click', function(){ copyLogContent(this); }); document.getElementById('btn_export_config').addEventListener('click', function() { var fd = new FormData(); fd.append('export_config', '1'); var tok = null; var tn = document.querySelector('input[name="token"]'); if (tn) tok = tn.value; else if (typeof L !== 'undefined' && L.env) tok = L.env.token || L.env.requesttoken || null; if (!tok) { var cm = document.cookie.match(/(?:sysauth_http|sysauth)=([^;]+)/); if (cm) tok = cm[1]; } if (tok) fd.append('token', tok); fetch(lu_current_url.split('#')[0], {method: 'POST', body: fd}).then(r => r.text()).then(txt => { txt = cleanResponse(txt); var blob = new Blob([txt], {type: 'application/toml'}); var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'telemt.toml'; document.body.appendChild(a); a.click(); document.body.removeChild(a); }); }); }, 500);</script>]]
+lv.default = [[<div style="width:100%; box-sizing:border-box; height:500px; font-family:monospace; font-size:12px; padding:12px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #333; border-radius: 4px; overflow-y:auto; overflow-x:auto; white-space:pre;" id="telemt_log_container">Click a button below to load data.</div><div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;"><input type="button" class="cbi-button cbi-button-apply" id="btn_load_log" value="System Log" /><input type="button" class="cbi-button cbi-button-reset" id="btn_load_scanners" value="Show Active Scanners" /><input type="button" class="cbi-button cbi-button-action" id="btn_copy_log" value="Copy Output" /><input type="button" class="cbi-button cbi-button-neural" id="btn_export_config" value="Export active config" style="background:#4a90e2; color:#fff; border:1px solid #357abd;" /><input type="button" class="cbi-button cbi-button-remove" id="btn_reset_config" value="Reset Config" /></div><script>setTimeout(function(){ document.getElementById('btn_load_log').addEventListener('click', loadLog); document.getElementById('btn_load_scanners').addEventListener('click', loadScanners); document.getElementById('btn_copy_log').addEventListener('click', function(){ copyLogContent(this); }); document.getElementById('btn_export_config').addEventListener('click', function() { var fd = new FormData(); fd.append('export_config', '1'); var tok = null; var tn = document.querySelector('input[name="token"]'); if (tn) tok = tn.value; else if (typeof L !== 'undefined' && L.env) tok = L.env.token || L.env.requesttoken || null; if (!tok) { var cm = document.cookie.match(/(?:sysauth_http|sysauth)=([^;]+)/); if (cm) tok = cm[1]; } if (tok) fd.append('token', tok); fetch(lu_current_url.split('#')[0], {method: 'POST', body: fd}).then(r => r.text()).then(txt => { txt = cleanResponse(txt); var blob = new Blob([txt], {type: 'application/toml'}); var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'telemt.toml'; document.body.appendChild(a); a.click(); document.body.removeChild(a); }); }); document.getElementById('btn_reset_config').addEventListener('click', function() { if(confirm('Are you sure you want to RESET ALL Telemt settings to defaults? This will erase all users and cascades!')) { var fd = new FormData(); fd.append('reset_config', '1'); var tok = null; var tn = document.querySelector('input[name="token"]'); if (tn) tok = tn.value; else if (typeof L !== 'undefined' && L.env) tok = L.env.token || L.env.requesttoken || null; if (!tok) { var cm = document.cookie.match(/(?:sysauth_http|sysauth)=([^;]+)/); if (cm) tok = cm[1]; } if (tok) fd.append('token', tok); fetch(lu_current_url.split('#')[0], {method: 'POST', body: fd}).then(() => { window.location.reload(); }); } }); }, 500);</script>]]
 
 -- === TAB: USERS ===
 local anchor = s:taboption("users", DummyValue, "_users_anchor", ""); anchor.rawhtml = true; anchor.default = '<div id="users_tab_anchor" style="display:none"></div>'
@@ -522,12 +533,23 @@ function formatUptime(secs) { if(!secs) return '0s'; var d = Math.floor(secs/864
 
 window._telemtLastStats = null;
 
-// Clean OW 24.10 HTML wrappers
 function cleanResponse(txt) {
     if (!txt) return '';
     var cut = txt.search(/<(!DOCTYPE|html[\s>])/i);
     if (cut > 0) return txt.substring(0, cut).trim();
     return txt;
+}
+
+function updateCascadesState() {
+    var upRows = document.querySelectorAll('#cbi-telemt-upstream .cbi-section-node:not([id*="-template"])');
+    var masterSwitch = document.querySelector('input[type="checkbox"][name*="enable_upstreams"]');
+    if (masterSwitch) {
+        if (upRows.length === 0) {
+            masterSwitch.disabled = true; masterSwitch.checked = false; masterSwitch.title = "No cascades configured";
+        } else {
+            masterSwitch.disabled = false; masterSwitch.title = "";
+        }
+    }
 }
 
 function fetchMetrics() {
@@ -569,7 +591,7 @@ function fetchMetrics() {
             var finalTx = stat.live_tx + stat.acc_tx; var finalRx = stat.live_rx + stat.acc_rx; if (stat.conns > 0) usersOnline++;
             
             var qStr = statEl.getAttribute('data-q'); var eStr = statEl.getAttribute('data-e'); var isEn = statEl.getAttribute('data-en');
-            if (isEn === "0") { statEl.innerHTML = "<span style='color:#888; font-weight:bold;'>[ PAUSED ]</span>"; return; }
+            var cb = document.querySelector('input[name*="cbid.telemt.' + u + '.enabled"]');
             
             var isExpired = false;
             if (eStr) { var p = eStr.split(' '); if(p.length==2) { var d=p[0].split('.'); var t=p[1].split(':'); if(d.length==3 && t.length==2) { if (Date.now() > new Date(d[2], d[1]-1, d[0], t[0], t[1]).getTime()) isExpired = true; } } }
@@ -577,23 +599,31 @@ function fetchMetrics() {
             var isOverQuota = false;
             if (qStr) { var qGB = parseFloat(qStr); if (!isNaN(qGB) && qGB > 0) { if ((finalTx + finalRx) >= (qGB * 1073741824)) isOverQuota = true; } }
             
-            if (isExpired || isOverQuota) { 
-                var reason = isExpired ? "Expired" : "Quota Exceeded";
-                var cb = document.querySelector('input[name*="cbid.telemt.' + u + '.enabled"]');
-                if (cb && cb.checked) {
-                    cb.checked = false;
-                    var f = new FormData(); f.append('auto_pause_user', u); f.append('reason', reason);
-                    var tokenVal = null;
-                    var tokenNode = document.querySelector('input[name="token"]');
-                    if (tokenNode) tokenVal = tokenNode.value;
-                    else if (typeof L !== 'undefined' && L.env) tokenVal = L.env.token || L.env.requesttoken || null;
+            if (isExpired) { 
+                if (isEn !== "0" || (cb && cb.checked)) {
+                    if (cb) cb.checked = false;
+                    var f = new FormData(); f.append('auto_pause_user', u); f.append('reason', 'Expired');
+                    var tokenVal = null; var tokenNode = document.querySelector('input[name="token"]');
+                    if (tokenNode) tokenVal = tokenNode.value; else if (typeof L !== 'undefined' && L.env) tokenVal = L.env.token || L.env.requesttoken || null;
                     if (!tokenVal) { var cm = document.cookie.match(/(?:sysauth_http|sysauth)=([^;]+)/); if (cm) tokenVal = cm[1]; }
-                    if (tokenVal) f.append('token', tokenVal);
-                    fetch(lu_current_url.split('#')[0], { method: 'POST', body: f });
+                    if (tokenVal) f.append('token', tokenVal); fetch(lu_current_url.split('#')[0], { method: 'POST', body: f });
                     statEl.setAttribute('data-en', '0');
                 }
-                statEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>[" + (isExpired ? "EXPIRED" : "QUOTA") + "]</span>"; return; 
+                statEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>[ PAUSED: EXPIRED ]</span>"; return; 
             }
+            if (isOverQuota) { 
+                if (isEn !== "0" || (cb && cb.checked)) {
+                    if (cb) cb.checked = false;
+                    var f = new FormData(); f.append('auto_pause_user', u); f.append('reason', 'Quota Exceeded');
+                    var tokenVal = null; var tokenNode = document.querySelector('input[name="token"]');
+                    if (tokenNode) tokenVal = tokenNode.value; else if (typeof L !== 'undefined' && L.env) tokenVal = L.env.token || L.env.requesttoken || null;
+                    if (!tokenVal) { var cm = document.cookie.match(/(?:sysauth_http|sysauth)=([^;]+)/); if (cm) tokenVal = cm[1]; }
+                    if (tokenVal) f.append('token', tokenVal); fetch(lu_current_url.split('#')[0], { method: 'POST', body: f });
+                    statEl.setAttribute('data-en', '0');
+                }
+                statEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>[ PAUSED: QUOTA ]</span>"; return; 
+            }
+            if (isEn === "0" || (cb && !cb.checked)) { statEl.innerHTML = "<span style='color:#888; font-weight:bold;'>[ PAUSED: MANUAL ]</span>"; return; }
             
             var c_col = stat.conns > 0 ? "#00a000" : "#888"; 
             var dotUser = "<svg width='10' height='10' style='vertical-align:middle;'><circle cx='5' cy='5' r='5' fill='" + c_col + "'/></svg>";
@@ -606,7 +636,7 @@ function fetchMetrics() {
         
         var sumEl = document.getElementById('telemt_users_summary_inner');
         if (sumEl) {
-            var dpiHtml = "<span class='sum-divider'>|</span><span><span style='font-weight:bold; color:#555;'>[DPI Probes]</span> <span style='color:" + (globalStatsObj.dpi > 0 ? "#d9534f" : "#00a000") + "; font-weight:bold; margin-left:4px;'>" + globalStatsObj.dpi + "</span></span>";
+            var dpiHtml = "<span class='sum-divider'>|</span><span><span style='font-weight:bold; color:#555;'>DPI Probes:</span> <span style='color:" + (globalStatsObj.dpi > 0 ? "#d9534f" : "#00a000") + "; font-weight:bold; margin-left:4px;'>" + globalStatsObj.dpi + "</span></span>";
             if (txt.trim() === "") { sumEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>Status: Offline</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#888; margin-left:4px;'>0</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>" + dpiHtml; } 
             else { sumEl.innerHTML = "<b style='margin-right:6px;'>Uptime:</b><span style='color:#666;'>" + formatUptime(globalStatsObj.uptime) + "</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Bandwidth:</b> <span style='color:#00a000;'>&darr; " + speedDL.toFixed(2) + "</span> <span style='color:#d35400; margin-left:4px;'>&uarr; " + speedUL.toFixed(2) + "</span> <small>Mbps</small></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#00a000; margin-left:4px;'>" + usersOnline + "</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>" + dpiHtml; }
         }
@@ -625,6 +655,7 @@ function updateLinks() {
         var secInp = row.querySelector('input[name*="secret"]'); var linkOut = row.querySelector('.user-link-out');
         if(secInp && linkOut) { var val = secInp.value.trim(); if(/^[0-9a-fA-F]{32}$/.test(val)) { var finalSecret = (effectiveFmt === 'tls' || effectiveFmt === 'all') ? "ee" + val + hd : ((effectiveFmt === 'dd') ? "dd" + val : val); linkOut.value = "tg://proxy?server=" + ip + "&port=" + port + "&secret=" + finalSecret; linkOut.classList.remove('user-link-err'); } else { linkOut.value = "Error: 32 hex chars required!"; linkOut.classList.add('user-link-err'); } }
     });
+    updateCascadesState();
 }
 
 function copyProxyLink(btn) { var row = btn.closest('.cbi-section-table-row') || btn.closest('.cbi-row'); if (!row) return; var input = row.querySelector('.user-link-out'); if (input && !input.classList.contains('user-link-err')) { var textToCopy = input.value; logToRouter("WebUI: Proxy link copied to clipboard"); if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(textToCopy).then(function() { var oldVal = btn.value; btn.value = '✔'; setTimeout(function(){ btn.value = oldVal; }, 1500); }); } else { input.select(); input.setSelectionRange(0, 99999); try { if(document.execCommand('copy')) { var oldVal = btn.value; btn.value = '✔'; setTimeout(function(){ btn.value = oldVal; }, 1500); } } catch(e) {} } } }
@@ -725,7 +756,7 @@ function injectUI() {
     var ipFlds = []; var m1 = document.querySelector('input[name*="cbid.telemt.general.external_ip"]'); if(m1) ipFlds.push(m1); var m2 = document.getElementById('telemt_mirror_ip'); if(m2) ipFlds.push(m2);
     ipFlds.forEach(function(ipFld) { if(!ipFld.dataset.refBtnInjected && ipFld.type !== "hidden") { ipFld.dataset.refBtnInjected = "1"; if(ipFld.parentNode) { ipFld.parentNode.style.display = 'flex'; ipFld.parentNode.style.alignItems = 'center'; var btn = document.createElement('input'); btn.type = 'button'; btn.className = 'cbi-button cbi-button-neural'; btn.value = 'Get IP'; btn.style.marginLeft = '5px'; btn.style.padding = '0 10px'; btn.style.height = ipFld.offsetHeight > 0 ? ipFld.offsetHeight + 'px' : '32px'; btn.addEventListener('click', function(){ fetchIPViaWget(this); }); ipFld.parentNode.appendChild(btn); } } });
 
-    // COLLAPSIBLE CASCADE CARDS & DYNAMIC TITLE & REMOVE BTN
+    // COLLAPSIBLE CASCADE CARDS & DYNAMIC TITLE
     document.querySelectorAll('#cbi-telemt-upstream .cbi-section-node:not([id*="-template"])').forEach(function(row, index) {
         if (!row.dataset.cascadeInjected) {
             row.dataset.cascadeInjected = "1";
@@ -750,7 +781,7 @@ function injectUI() {
                 var text = 'Cascade #' + (index + 1);
                 if (vName || vAddr) {
                     text += ' — ' + (vName ? vName : 'Unnamed');
-                    if (vAddr) text += ' (' + vAddr + ')';
+                    if (vAddr) text += ' <span style="color:#888; font-weight:normal; font-size:0.9em;">(' + vAddr + ')</span>';
                 }
                 titleSpan.innerHTML = text;
             };
@@ -766,7 +797,6 @@ function injectUI() {
                 toggleSpan.innerHTML = isHidden ? '&#9660;' : '&#9654;';
             });
             
-            // ENSURE DELETE BUTTON IS BOTTOM LEFT
             var parent = row.parentElement;
             var rmDiv = parent ? (parent.querySelector(':scope > .cbi-section-remove') || null) : null;
             if (!rmDiv) {
@@ -819,11 +849,24 @@ function injectUI() {
         }
         
         var cb = row.querySelector('input[type="checkbox"][name*=".enabled"]');
-        if (cb) { cb.addEventListener('change', function(e) { logToRouter("User " + uName + " manually " + (e.target.checked ? "Resumed" : "Paused")); }); }
+        if (cb) { 
+            cb.addEventListener('change', function(e) { 
+                logToRouter("User " + uName + " manually " + (e.target.checked ? "Resumed" : "Paused")); 
+            }); 
+        }
         
         niList.forEach(function(ni){
             var propName = ni.name.match(/([^\.]+)$/); var fName = propName ? propName[1] : "limit";
-            ni.addEventListener('change', function(e) { logToRouter("User " + uName + " " + fName + " changed to: " + (e.target.value || "unlimited")); });
+            ni.addEventListener('change', function(e) { 
+                logToRouter("User " + uName + " " + fName + " changed to: " + (e.target.value || "unlimited")); 
+                // AUTO-RESUME LOGIC
+                if (fName === 'expire_date' || fName === 'data_quota') {
+                    if (cb && !cb.checked) {
+                        cb.checked = true;
+                        logToRouter("User " + uName + " auto-resumed due to " + fName + " update");
+                    }
+                }
+            });
             var wrapper = document.createElement('div'); wrapper.className = 'telemt-num-wrap'; ni.parentNode.insertBefore(wrapper, ni); wrapper.appendChild(ni);
             if(ni.name.indexOf('expire_date') !== -1) {
                 var calContainer = document.createElement('div'); calContainer.className = 'telemt-cal-wrap'; var calBtn = document.createElement('input'); calBtn.type = 'button'; calBtn.className = 'cbi-button cbi-button-action telemt-btn-cal'; calBtn.title = 'Select Date'; calBtn.value = ' ';

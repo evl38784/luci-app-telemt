@@ -1,6 +1,6 @@
 -- ==============================================================================
 -- Telemt CBI Model (Configuration Binding Interface)
--- Version: 3.1.4 (Epoch 1: Tabs, Upstreams, Smart Dashboard)
+-- Version: 3.1.4 (Epoch 1: Tabs, Upstreams, Smart Dashboard) - BUGFIX 2
 -- ==============================================================================
 
 local sys = require "luci.sys"
@@ -27,20 +27,30 @@ local safe_url = current_url:gsub('"', '\\"'):gsub('<', '&lt;'):gsub('>', '&gt;'
 
 local function tip(txt) return string.format([[<span class="telemt-tip" title="%s">(?)</span>]], txt:gsub('"', '&quot;')) end
 
+-- ==============================================================================
+-- AJAX DISPATCHER (Ucode-safe exit pattern)
+-- ==============================================================================
 local is_post = (http.getenv("REQUEST_METHOD") == "POST")
+
+local function exit_cleanly()
+    if dsp.context then dsp.context.rendered = true end
+    local dummy = Map("telemt", "")
+    function dummy.render() end; function dummy.parse() end
+    return dummy
+end
 
 if is_post and http.formvalue("log_ui_event") == "1" then
     local msg = http.formvalue("msg")
     if msg then sys.call(string.format("logger -t telemt %q", "WebUI: " .. msg:gsub("[%c]", " "):gsub("[^A-Za-z0-9 _.%-]", ""):sub(1, 128))) end
-    http.prepare_content("text/plain"); http.write("ok"); http.close(); return
+    http.prepare_content("text/plain"); http.write("ok"); return exit_cleanly()
 end
 
-if is_post and http.formvalue("reset_stats") == "1" then sys.call("logger -t telemt 'WebUI: Executed manual Reset Traffic Stats'; rm -f /tmp/telemt_stats.txt"); http.redirect(current_url); return end
-if is_post and http.formvalue("start") == "1" then sys.call("logger -t telemt 'WebUI: Manual START service requested'; /etc/init.d/telemt start"); http.redirect(current_url); return end
-if is_post and http.formvalue("stop") == "1" then sys.call("logger -t telemt 'WebUI: Manual STOP service requested'; /etc/init.d/telemt run_save_stats; /etc/init.d/telemt stop; sleep 1; pidof telemt >/dev/null && killall -9 telemt 2>/dev/null"); http.redirect(current_url); return end
-if is_post and http.formvalue("restart") == "1" then sys.call("logger -t telemt 'WebUI: Manual RESTART service requested'; /etc/init.d/telemt run_save_stats; /etc/init.d/telemt stop; sleep 1; pidof telemt >/dev/null && killall -9 telemt 2>/dev/null; /etc/init.d/telemt start"); http.redirect(current_url); return end
+if is_post and http.formvalue("reset_stats") == "1" then sys.call("logger -t telemt 'WebUI: Executed manual Reset Traffic Stats'; rm -f /tmp/telemt_stats.txt"); http.redirect(current_url); return exit_cleanly() end
+if is_post and http.formvalue("start") == "1" then sys.call("logger -t telemt 'WebUI: Manual START service requested'; /etc/init.d/telemt start"); http.redirect(current_url); return exit_cleanly() end
+if is_post and http.formvalue("stop") == "1" then sys.call("logger -t telemt 'WebUI: Manual STOP service requested'; /etc/init.d/telemt run_save_stats; /etc/init.d/telemt stop; sleep 1; pidof telemt >/dev/null && killall -9 telemt 2>/dev/null"); http.redirect(current_url); return exit_cleanly() end
+if is_post and http.formvalue("restart") == "1" then sys.call("logger -t telemt 'WebUI: Manual RESTART service requested'; /etc/init.d/telemt run_save_stats; /etc/init.d/telemt stop; sleep 1; pidof telemt >/dev/null && killall -9 telemt 2>/dev/null; /etc/init.d/telemt start"); http.redirect(current_url); return exit_cleanly() end
 
-local is_ajax = (http.formvalue("get_metrics") or http.formvalue("get_fw_status") or http.formvalue("get_log") or http.formvalue("get_scanners") or http.formvalue("get_wan_ip") or http.formvalue("get_qr") or http.formvalue("log_ui_event"))
+local is_ajax = (http.formvalue("get_metrics") or http.formvalue("get_fw_status") or http.formvalue("get_log") or http.formvalue("get_scanners") or http.formvalue("get_wan_ip") or http.formvalue("get_qr"))
 
 if http.formvalue("get_fw_status") == "1" then
     local afw = uci_cursor:get("telemt", "general", "auto_fw") or "0"
@@ -54,7 +64,7 @@ if http.formvalue("get_fw_status") == "1" then
     if is_physically_open then status_msg = "<span style='color:green; font-weight:bold'>OPEN (OK)</span>"; tip_msg = (afw == "0") and "(Auto-FW disabled, but port is open in rules)" or ""
     elseif is_procd_open and is_running then status_msg = "<span style='color:green; font-weight:bold'>OPEN (OK)</span>"; tip_msg = "(Not visible in FW rules. Manual port opening recommended)" end
     if not is_running then status_msg = "<span style='color:#d9534f; font-weight:bold'>SERVICE STOPPED</span> <span style='color:#888'>|</span> " .. status_msg end
-    http.write(status_msg .. (tip_msg ~= "" and " <span style='color:#888; font-size:0.85em; margin-left:5px;'>" .. tip_msg .. "</span>" or "")); http.close(); return
+    http.write(status_msg .. (tip_msg ~= "" and " <span style='color:#888; font-size:0.85em; margin-left:5px;'>" .. tip_msg .. "</span>" or "")); return exit_cleanly()
 end
 
 if http.formvalue("get_metrics") == "1" then
@@ -70,7 +80,7 @@ if http.formvalue("get_metrics") == "1" then
         for line in f:lines() do local u, tx, rx = line:match("^(%S+) (%S+) (%S+)$"); if u then metrics = metrics .. string.format("telemt_accumulated_tx{user=\"%s\"} %s\ntelemt_accumulated_rx{user=\"%s\"} %s\n", u, tx, u, rx) end end
         f:close()
     end
-    http.prepare_content("text/plain"); http.write(metrics); http.close(); return
+    http.prepare_content("text/plain"); http.write(metrics); return exit_cleanly()
 end
 
 if http.formvalue("get_scanners") == "1" then
@@ -78,35 +88,31 @@ if http.formvalue("get_scanners") == "1" then
     local fetch_cmd = (fetch_bin == "wget") and "wget -q --timeout=3 -O -" or "uclient-fetch -q --timeout=3 -O -"
     local res = sys.exec(string.format("%s 'http://127.0.0.1:%d/beobachten' 2>/dev/null", fetch_cmd, m_port))
     if not res or res:gsub("%s+", "") == "" then res = "No active scanners detected or proxy is offline." end
-    http.prepare_content("text/plain"); http.write(res); http.close(); return
+    http.prepare_content("text/plain"); http.write(res); return exit_cleanly()
 end
 
 if http.formvalue("get_log") == "1" then
     local cmd = "logread -e 'telemt' | tail -n 50 2>/dev/null"
     if has_cmd("timeout") then cmd = "timeout 2 " .. cmd end
     local log_data = sys.exec(cmd); if not log_data or log_data:gsub("%s+", "") == "" then log_data = "No logs found." end
-    http.prepare_content("text/plain"); http.write(log_data:gsub("\27%[[%d;]*m", "")); http.close(); return
+    http.prepare_content("text/plain"); http.write(log_data:gsub("\27%[[%d;]*m", "")); return exit_cleanly()
 end
 
 if http.formvalue("get_wan_ip") == "1" then
     local fetch_cmd = (fetch_bin == "wget") and "wget -q --timeout=3 -O -" or "uclient-fetch -q --timeout=3 -O -"
     local ip = (sys.exec(fetch_cmd .. " https://ipv4.internet.yandex.net/api/v0/ip 2>/dev/null") or ""):gsub("%s+", ""):gsub("\"", "")
     if not ip:match("^%d+%.%d+%.%d+%.%d+$") then ip = (sys.exec(fetch_cmd .. " https://checkip.amazonaws.com 2>/dev/null") or ""):gsub("%s+", "") end
-    http.prepare_content("text/plain"); http.write(ip:match("^%d+%.%d+%.%d+%.%d+$") and ip or "0.0.0.0"); http.close(); return
+    http.prepare_content("text/plain"); http.write(ip:match("^%d+%.%d+%.%d+%.%d+$") and ip or "0.0.0.0"); return exit_cleanly()
 end
 
 if http.formvalue("get_qr") == "1" then
     local link = http.formvalue("link")
-    if not link or link == "" or not link:match("^tg://proxy%?[a-zA-Z0-9=%%&_.-]+$") then http.prepare_content("text/plain"); http.write("error: invalid_link"); http.close(); return end
-    if not has_cmd("qrencode") then http.prepare_content("text/plain"); http.write("error: qrencode_missing"); http.close(); return end
+    if not link or link == "" or not link:match("^tg://proxy%?[a-zA-Z0-9=%%&_.-]+$") then http.prepare_content("text/plain"); http.write("error: invalid_link"); return exit_cleanly() end
+    if not has_cmd("qrencode") then http.prepare_content("text/plain"); http.write("error: qrencode_missing"); return exit_cleanly() end
     http.prepare_content("image/svg+xml"); local cmd = string.format("qrencode -t SVG -s 4 -m 1 -o - %q 2>/dev/null", link)
     if has_cmd("timeout") then cmd = "timeout 2 " .. cmd end
-    http.write(sys.exec(cmd)); http.close(); return
+    http.write(sys.exec(cmd)); return exit_cleanly()
 end
-
-local clean_csv = "username,secret,max_tcp_conns,max_unique_ips,data_quota,expire_date\n"
-uci_cursor:foreach("telemt", "user", function(s) clean_csv = clean_csv .. string.format("%s,%s,%s,%s,%s,%s\n", s['.name'] or "", s.secret or "", s.max_tcp_conns or "", s.max_unique_ips or "", s.data_quota or "", s.expire_date or "") end)
-clean_csv = clean_csv:gsub("\n", "\\n"):gsub("\r", "")
 
 local function norm_secret(s) if not s then return nil end; s = s:match("secret=(%x+)") or s; local hex = s:match("(%x+)"); if not hex then return nil end; local pfx = hex:sub(1,2):lower(); if pfx == "ee" or pfx == "dd" then hex = hex:sub(3) end; if #hex < 32 then return nil end; return hex:sub(1, 32):lower() end
 
@@ -136,11 +142,15 @@ if is_post and http.formvalue("import_users") == "1" then
             end
             uci_cursor:save("telemt"); uci_cursor:commit("telemt")
             sys.call("logger -t telemt \"WebUI: Successfully imported " .. #valid_users .. " users via CSV.\"")
-            http.redirect(current_url .. (current_url:match("?") and "&" or "?") .. "import_ok=" .. tostring(#valid_users)); return
+            http.redirect(current_url .. (current_url:match("?") and "&" or "?") .. "import_ok=" .. tostring(#valid_users)); return exit_cleanly()
         end
     end
-    http.redirect(current_url); return
+    http.redirect(current_url); return exit_cleanly()
 end
+
+local clean_csv = "username,secret,max_tcp_conns,max_unique_ips,data_quota,expire_date\n"
+uci_cursor:foreach("telemt", "user", function(s) clean_csv = clean_csv .. string.format("%s,%s,%s,%s,%s,%s\n", s['.name'] or "", s.secret or "", s.max_tcp_conns or "", s.max_unique_ips or "", s.data_quota or "", s.expire_date or "") end)
+clean_csv = clean_csv:gsub("\n", "\\n"):gsub("\r", "")
 
 local bin_info = ""
 if not is_ajax then
@@ -218,8 +228,9 @@ afw.default = "0"; afw.description = "<div style='margin-top:5px; padding:8px; b
 local ll = s:taboption("general", ListValue, "log_level", "Log Level" .. tip("Verbosity of telemt daemon log output.")); ll:value("debug", "Debug"); ll:value("verbose", "Verbose"); ll:value("normal", "Normal (default)"); ll:value("silent", "Silent"); ll.default = "normal"
 
 -- === TAB: UPSTREAMS (CASCADES) ===
+local up_anchor = s:taboption("upstreams", DummyValue, "_up_anchor", ""); up_anchor.rawhtml = true; up_anchor.default = '<div id="upstreams_tab_anchor" style="display:none"></div>'
 s_up = m:section(TypedSection, "upstream", "Upstream Proxies (Cascades)", "Chain your outgoing Telegram traffic through other servers (e.g. to bypass ISP DPI).<br><b>Note:</b> If no upstreams are enabled, the proxy will fallback to <b>Direct connection</b>.")
-s_up.addremove = true; s_up.anonymous = true; s_up.tab_ref = "upstreams" -- Logic placeholder for tab attachment
+s_up.addremove = true; s_up.anonymous = true
 local uen = s_up:option(Flag, "enabled", "Enable Upstream")
 uen.default = "1"; uen.rmempty = false
 local ut = s_up:option(ListValue, "type", "Protocol Type")
@@ -256,7 +267,7 @@ s:taboption("advanced", Value, "tls_full_cert_ttl_secs", "TLS Full Cert TTL (sec
 s:taboption("advanced", Flag, "ignore_time_skew", "Ignore Time Skew" .. tip("Disable strict time checks. Useful if clients have desynced clocks.")).default = "0"
 
 local htm = s:taboption("advanced", DummyValue, "_head_tm"); htm.rawhtml = true
-htm.default = [[<details id="telemt_timeouts_details" style="margin-top:20px; padding:10px; background:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.3); border-radius:6px; cursor:pointer;"><summary style="font-weight:bold; font-size:1.05em; outline:none; cursor:pointer;">Timeouts & Replay Protection (Click to expand)</summary><p style="font-size:0.85em; opacity:0.8; margin-top:5px; margin-bottom:0;">Adjust connection timeouts and replay window. Leave defaults if unsure.</p></details><script>setTimeout(function(){var details = document.getElementById('telemt_timeouts_details');if(!details) return;var toMove = ['tm_handshake', 'tm_connect', 'tm_keepalive', 'tm_ack', 'replay_window_secs'];toMove.forEach(function(name){var el = document.querySelector('.cbi-value[data-name="' + name + '"]') || document.getElementById('cbi-telemt-advanced-' + name);if(el) { el.style.paddingLeft = '15px'; details.appendChild(el); }});}, 300);</script>]]
+htm.default = [[<details id="telemt_timeouts_details" style="margin-top:20px; padding:10px; background:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.3); border-radius:6px; cursor:pointer;"><summary style="font-weight:bold; font-size:1.05em; outline:none; cursor:pointer;">Timeouts & Replay Protection (Click to expand)</summary><p style="font-size:0.85em; opacity:0.8; margin-top:5px; margin-bottom:0;">Adjust connection timeouts and replay window. Leave defaults if unsure.</p></details><script>setTimeout(function(){var details = document.getElementById('telemt_timeouts_details');if(!details) return;var toMove = ['tm_handshake', 'tm_connect', 'tm_keepalive', 'tm_ack', 'replay_window_secs'];toMove.forEach(function(name){var el = document.querySelector('.cbi-value[data-name="' + name + '"]') || document.getElementById('cbi-telemt-general-' + name);if(el) { el.style.paddingLeft = '15px'; details.appendChild(el); }});}, 300);</script>]]
 s:taboption("advanced", Value, "tm_handshake", "Handshake" .. tip("Client handshake timeout in seconds.")).default = "15"
 s:taboption("advanced", Value, "tm_connect", "Connect" .. tip("Telegram DC connect timeout in seconds.")).default = "10"
 s:taboption("advanced", Value, "tm_keepalive", "Keepalive" .. tip("Client keepalive interval in seconds.")).default = "60"
@@ -273,7 +284,7 @@ local mlink = s:taboption("advanced", DummyValue, "_mlink", "Prometheus Endpoint
 mlink.default = string.format([[<a id="prom_link" href="#" target="_blank" class="telemt-prom-link" style="font-family: monospace; color: #00a000; padding: 4px; background: rgba(0,0,0,0.05); border-radius: 4px; text-decoration: none; border: 1px solid rgba(0,160,0,0.2);">http://&lt;router_ip&gt;:%d/metrics</a><script>setTimeout(function(){ var a = document.getElementById('prom_link'); if(a) { a.href = window.location.protocol + '//' + window.location.hostname + ':%d/metrics'; } }, 500);</script>]], cur_m_port, cur_m_port)
 
 -- === TAB: TELEGRAM BOT ===
-local hbot = s:taboption("bot", DummyValue, "_head_bot"); hbot.rawhtml = true; hbot.default = "<h3>Autonomous Telegram Bot (Sidecar)</h3><p style='opacity:0.8;'>Configure the autonomous local bot to monitor Telemt status, fetch stats via Telegram, and send crash alerts directly to your phone.</p>"
+local hbot = s:taboption("bot", DummyValue, "_head_bot", ""); hbot.rawhtml = true; hbot.default = "<h3>Autonomous Telegram Bot (Sidecar)</h3><p style='opacity:0.8; margin-top:5px; margin-bottom:15px;'>Configure the autonomous local bot to monitor Telemt status, fetch stats via Telegram, and send crash alerts directly to your phone.</p>"
 s:taboption("bot", Flag, "bot_enabled", "Enable Bot Sidecar" .. tip("Start the autonomous monitoring script via procd.")).default = "0"
 local bt = s:taboption("bot", Value, "bot_token", "Bot Token" .. tip("Get it from @BotFather.")); bt.password = true; bt:depends("bot_enabled", "1")
 local bc = s:taboption("bot", Value, "bot_chat_id", "Admin Chat ID" .. tip("Your personal or group Chat ID for alerts.")); bc:depends("bot_enabled", "1")
@@ -287,17 +298,16 @@ local anchor = s:taboption("users", DummyValue, "_users_anchor", ""); anchor.raw
 local myip_u = s:taboption("users", DummyValue, "_ip_display", "External IP / DynDNS" .. tip("IP address or domain used for generating tg:// links.")); myip_u.rawhtml = true; myip_u.default = string.format([[<input type="text" class="cbi-input-text" style="width:250px;" id="telemt_mirror_ip" value="%s">]], saved_ip)
 
 s2 = m:section(TypedSection, "user", "")
-s2.template = "cbi/tblsection"; s2.addremove = true; s2.anonymous = false; s2.tab_ref = "users"
+s2.template = "cbi/tblsection"; s2.addremove = true; s2.anonymous = false
 s2.create = function(self, section) if not section or not section:match("^[A-Za-z0-9_]+$") or #section > 15 then return nil end; sys.call(string.format("logger -t telemt 'WebUI: Added new user -> %s'", section)); return TypedSection.create(self, section) end
 s2.remove = function(self, section) sys.call(string.format("logger -t telemt 'WebUI: Deleted user -> %s'", section)); return TypedSection.remove(self, section) end
 
-local u_en = s2:option(Flag, "enabled", "Active" .. tip("Uncheck to manually pause this user without deleting.")); u_en.default = "1"; u_en.rmempty = false
 local sec = s2:option(Value, "secret", "Secret (32 hex)" .. tip("Leave empty to auto-generate.")); sec.rmempty = false; sec.datatype = "hexstring"; function sec.validate(self, value) if not value or value:gsub("%s+", "") == "" then value = (sys.exec("cat /proc/sys/kernel/random/uuid") or ""):gsub("%-", ""):gsub("%s+", ""):sub(1,32) end; if #value ~= 32 or not value:match("^[0-9a-fA-F]+$") then return nil, "Secret must be exactly 32 hex chars!" end; return value end
 local t_con = s2:option(Value, "max_tcp_conns", "TCP Conns" .. tip("Limit sessions (e.g. 50)")); t_con.datatype = "uinteger"; t_con.placeholder = "unlimited"
 local t_uips = s2:option(Value, "max_unique_ips", "Max IPs" .. tip("Max unique client IPs per user.")); t_uips.datatype = "uinteger"; t_uips.placeholder = "unlimited"
 local t_qta = s2:option(Value, "data_quota", "Quota (GB)" .. tip("E.g. 1.5 or 0.5")); t_qta.datatype = "ufloat"; t_qta.placeholder = "unlimited"
 local t_exp = s2:option(Value, "expire_date", "Expire Date" .. tip("Format: DD.MM.YYYY HH:MM")); t_exp.datatype = "string"; t_exp.placeholder = "DD.MM.YYYY HH:MM"; function t_exp.validate(self, value) if not value then return "" end value = value:match("^%s*(.-)%s*$"); if value == "" or value == "unlimited" then return "" end if not value:match("^%d%d%.%d%d%.%d%d%d%d %d%d:%d%d$") then return nil, "Format: DD.MM.YYYY HH:MM" end return value end
-
+local u_en = s2:option(Flag, "enabled", "Active" .. tip("Uncheck to manually pause this user.")); u_en.default = "1"; u_en.rmempty = false
 local lst = s2:option(DummyValue, "_stat", "Live Traffic" .. tip("Accumulated usage & sessions")); lst.rawhtml = true
 function lst.cfgvalue(self, section) 
     local q = self.map:get(section, "data_quota") or ""; local e = self.map:get(section, "expire_date") or ""; local en = self.map:get(section, "enabled") or "1"
@@ -318,6 +328,9 @@ html body #cbi-telemt-user .cbi-button-add:hover { background-color: #00a000 !im
 #cbi-telemt-user .cbi-section-table td:first-child { vertical-align: middle !important; }
 html body #cbi-telemt-user .cbi-section-table .cbi-button-remove:not(.telemt-btn-cross), html body #cbi-telemt-user td.cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross) { color: #d9534f !important; background-color: transparent !important; border: 1px solid #d9534f !important; transition: all 0.2s ease !important; padding: 0 12px !important; height: 30px !important; line-height: 28px !important; font-weight: normal !important; }
 html body #cbi-telemt-user .cbi-section-table .cbi-button-remove:not(.telemt-btn-cross):hover { background-color: #d9534f !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
+
+#cbi-telemt-upstream .cbi-section-remove { text-align: left !important; margin-top: 15px !important; }
+#cbi-telemt-upstream .cbi-button-remove { float: none !important; min-width: 100px !important; }
 
 .cbi-value-description { margin: -8px 0 0 0 !important; padding: 0 !important; font-size: 0.85em !important; opacity: 0.8; white-space: normal !important; }
 .telemt-tip { display: inline-block !important; vertical-align: middle !important; white-space: nowrap !important; cursor: help !important; opacity: 0.5 !important; font-size: 0.85em !important; border-bottom: 1px dotted currentColor !important; margin-left: 4px !important; margin-top: -2px !important; }
@@ -376,7 +389,7 @@ html[data-bs-theme="dark"] #csv_text_area, html[data-theme="dark"] #csv_text_are
     td[data-name="secret"] .telemt-sec-wrap { min-width: 160px !important; }
     .telemt-dash-btns { display: flex !important; align-items: center !important; gap: 10px !important; flex: 0 0 auto !important; margin-left: auto; }
     .telemt-action-btns { display: flex !important; align-items: center !important; justify-content: center !important; gap: 10px !important; flex: 0 0 auto !important; }
-    .telemt-dash-btns input.cbi-button, .telemt-action-btns input.cbi-button { float: none !important; margin: 0 !important; display: inline-block !important; position: static !important; }
+    .telemt-dash-btns input.cbi-button, .telemt-action-btns input.cbi-button, .telemt-dash-btns button, .telemt-action-btns button { float: none !important; margin: 0 !important; display: inline-block !important; position: static !important; }
     .telemt-dash-top-row { display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.2); border-radius:6px; margin-bottom:15px; flex-wrap:wrap; gap:15px; }
     .telemt-dash-bot-row { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:10px; margin-bottom:15px; text-align:center; width:100%; }
     .telemt-dash-warn { font-size:1em; color:#d35400; font-weight:bold; text-align:center; }
@@ -406,7 +419,7 @@ html[data-bs-theme="dark"] #csv_text_area, html[data-theme="dark"] #csv_text_are
 .qr-modal-overlay.active { opacity: 1; pointer-events: auto; }
 .custom-modal-content { background-color: var(--card-bg-color, #ffffff) !important; color: var(--text-color, #333333) !important; padding: 20px; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid var(--border-color, #cccccc) !important; text-align: center; max-width: 450px; width: 90%; }
 .custom-modal-content svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-#csv_text_area { background-color: var(--background-color, #f9f9f9) !important; color: var(--text-color, #333333) !important; border: 1px solid var(--border-color, #cccccc) !important; width: 100%; height: 120px; font-family: monospace; font-size: 11px; margin-bottom: 10px; box-sizing: border-box; padding: 5px; resize: vertical; }
+#csv_text_area { background-color: var(--background-color, #f9f9f9) !important; color: var(--text-color, #333333) !important; width: 100%; height: 120px; font-family: monospace; font-size: 11px; margin-bottom: 10px; box-sizing: border-box; padding: 5px; resize: vertical; }
 </style>
 
 <script type="text/javascript">
@@ -545,28 +558,37 @@ function showImportModal() {
 }
 
 function fixTabIsolation() {
-    var userTable = document.getElementById('cbi-telemt-user'); var anchor = document.getElementById('users_tab_anchor');
-    if (!userTable || !anchor) return; if (window._telemtTabFixed && userTable.parentNode) return; window._telemtTabFixed = true;
-    anchor.style.display = 'none'; var targetNode = anchor.closest('.cbi-tab') || anchor.closest('[data-tab]') || anchor.parentNode;
-    if (!targetNode) return; if (userTable.parentNode !== targetNode) { targetNode.appendChild(userTable); } userTable.style.display = ''; userTable.hidden = false;
-    
-    if (!document.getElementById('telemt_users_dashboard_panel')) {
-        var dash = document.createElement('div'); dash.id = 'telemt_users_dashboard_panel';
-        var topRow = document.createElement('div'); topRow.className = 'telemt-dash-top-row';
-        var sumInner = document.createElement('div'); sumInner.id = 'telemt_users_summary_inner'; sumInner.className = 'telemt-dash-summary'; topRow.appendChild(sumInner);
-        var btnsTop = document.createElement('div'); btnsTop.className = 'telemt-dash-btns';
-        var btnExpStat = document.createElement('input'); btnExpStat.type = 'button'; btnExpStat.className = 'cbi-button cbi-button-apply'; btnExpStat.value = 'Export Stats'; btnExpStat.addEventListener('click', doExportStats); btnsTop.appendChild(btnExpStat);
-        var btnRstStat = document.createElement('input'); btnRstStat.type = 'button'; btnRstStat.className = 'cbi-button cbi-button-remove'; btnRstStat.value = 'Reset Traffic Stats'; btnRstStat.addEventListener('click', function() { if(confirm('Clear RAM stats?')) { logAction('Reset Stats'); postAction('reset_stats'); } }); btnsTop.appendChild(btnRstStat);
-        topRow.appendChild(btnsTop); dash.appendChild(topRow);
-
-        var botRow = document.createElement('div'); botRow.className = 'telemt-dash-bot-row';
-        var btnsBot = document.createElement('div'); btnsBot.className = 'telemt-action-btns';
-        var btnExpCsv = document.createElement('input'); btnExpCsv.type = 'button'; btnExpCsv.className = 'cbi-button cbi-button-action'; btnExpCsv.value = 'Export Users (CSV)'; btnExpCsv.addEventListener('click', doExportCSV); btnsBot.appendChild(btnExpCsv);
-        var btnImpCsv = document.createElement('input'); btnImpCsv.type = 'button'; btnImpCsv.className = 'cbi-button cbi-button-apply'; btnImpCsv.value = 'Import Users (CSV)'; btnImpCsv.addEventListener('click', showImportModal); btnsBot.appendChild(btnImpCsv);
-        botRow.appendChild(btnsBot); dash.appendChild(botRow);
+    var userTable = document.getElementById('cbi-telemt-user'); var userAnchor = document.getElementById('users_tab_anchor');
+    if (userTable && userAnchor && userTable.parentNode) {
+        var userTarget = userAnchor.closest('.cbi-tab') || userAnchor.closest('[data-tab]') || userAnchor.parentNode;
+        if (userTarget && userTable.parentNode !== userTarget) { userTarget.appendChild(userTable); }
+        userTable.style.display = ''; userTable.hidden = false;
         
-        var warnMsg = document.createElement('div'); warnMsg.className = 'telemt-dash-warn'; warnMsg.innerText = 'Important: You must create at least one active user for the proxy to start!'; dash.appendChild(warnMsg);
-        targetNode.insertBefore(dash, userTable);
+        if (!document.getElementById('telemt_users_dashboard_panel')) {
+            var dash = document.createElement('div'); dash.id = 'telemt_users_dashboard_panel';
+            var topRow = document.createElement('div'); topRow.className = 'telemt-dash-top-row';
+            var sumInner = document.createElement('div'); sumInner.id = 'telemt_users_summary_inner'; sumInner.className = 'telemt-dash-summary'; topRow.appendChild(sumInner);
+            var btnsTop = document.createElement('div'); btnsTop.className = 'telemt-dash-btns';
+            var btnExpStat = document.createElement('input'); btnExpStat.type = 'button'; btnExpStat.className = 'cbi-button cbi-button-apply'; btnExpStat.value = 'Export Stats'; btnExpStat.addEventListener('click', doExportStats); btnsTop.appendChild(btnExpStat);
+            var btnRstStat = document.createElement('input'); btnRstStat.type = 'button'; btnRstStat.className = 'cbi-button cbi-button-remove'; btnRstStat.value = 'Reset Traffic Stats'; btnRstStat.addEventListener('click', function() { if(confirm('Clear RAM stats?')) { logAction('Reset Stats'); postAction('reset_stats'); } }); btnsTop.appendChild(btnRstStat);
+            topRow.appendChild(btnsTop); dash.appendChild(topRow);
+
+            var botRow = document.createElement('div'); botRow.className = 'telemt-dash-bot-row';
+            var btnsBot = document.createElement('div'); btnsBot.className = 'telemt-action-btns';
+            var btnExpCsv = document.createElement('input'); btnExpCsv.type = 'button'; btnExpCsv.className = 'cbi-button cbi-button-action'; btnExpCsv.value = 'Export Users (CSV)'; btnExpCsv.addEventListener('click', doExportCSV); btnsBot.appendChild(btnExpCsv);
+            var btnImpCsv = document.createElement('input'); btnImpCsv.type = 'button'; btnImpCsv.className = 'cbi-button cbi-button-apply'; btnImpCsv.value = 'Import Users (CSV)'; btnImpCsv.addEventListener('click', showImportModal); btnsBot.appendChild(btnImpCsv);
+            botRow.appendChild(btnsBot); dash.appendChild(botRow);
+            
+            var warnMsg = document.createElement('div'); warnMsg.className = 'telemt-dash-warn'; warnMsg.innerText = 'Important: You must create at least one active user for the proxy to start!'; dash.appendChild(warnMsg);
+            userTarget.insertBefore(dash, userTable);
+        }
+    }
+    
+    var upTable = document.getElementById('cbi-telemt-upstream'); var upAnchor = document.getElementById('upstreams_tab_anchor');
+    if (upTable && upAnchor && upTable.parentNode) {
+        var upTarget = upAnchor.closest('.cbi-tab') || upAnchor.closest('[data-tab]') || upAnchor.parentNode;
+        if (upTarget && upTable.parentNode !== upTarget) { upTarget.appendChild(upTable); }
+        upTable.style.display = ''; upTable.hidden = false;
     }
 }
 
@@ -577,7 +599,10 @@ function isTemplateRow(row) {
 
 function injectUI() {
     fixTabIsolation();
-    if (!is_owrt25) { var firstTh = document.querySelector('#cbi-telemt-user .cbi-section-table-titles th:first-child') || document.querySelector('#cbi-telemt-user thead th:first-child'); if (firstTh && !firstTh.dataset.renamed) { var txt = (firstTh.textContent || '').trim().toLowerCase(); if (txt == 'name' || txt == 'название' || txt == '') { firstTh.textContent = 'User'; firstTh.dataset.renamed = "1"; } } }
+    
+    var secretTh = document.querySelector('#cbi-telemt-user th[data-name="secret"]') || document.querySelector('#cbi-telemt-user .cbi-section-table-titles th:first-child') || document.querySelector('#cbi-telemt-user thead th:first-child');
+    if (secretTh && !secretTh.dataset.renamed) { var txt = (secretTh.textContent || '').trim().toLowerCase(); if (txt == 'secret' || txt == 'секрет' || txt == 'name' || txt == '') { secretTh.textContent = 'User / Secret'; secretTh.dataset.renamed = "1"; } }
+    
     var btnAdd = document.querySelector('.cbi-button-add'); if (btnAdd && btnAdd.value !== 'Add user') btnAdd.value = 'Add user';
     var newNameInp = document.querySelector('.cbi-section-create-name'); if(newNameInp && !newNameInp.dataset.maxInjected) { newNameInp.dataset.maxInjected = "1"; newNameInp.maxLength = 15; newNameInp.placeholder = "a-z, 0-9, _"; }
     
@@ -590,8 +615,12 @@ function injectUI() {
         if (!secInp || niList.length === 0 || !linkWrap) return; row.dataset.injected = "1";
         
         var match = secInp.name.match(/cbid\.telemt\.([^.]+)\.secret/); var uName = match ? match[1] : '?';
-        if (is_owrt25) { var secretTd = secInp.closest('td'); if (secretTd) { var nameDiv = secretTd.querySelector('.telemt-fallback-name'); if (!nameDiv) { nameDiv = document.createElement('div'); nameDiv.className = 'telemt-fallback-name telemt-user-col-text'; nameDiv.style.cssText = 'margin-bottom: 6px; font-size: 1.1em; font-family: monospace; display: block; color: #005ce6 !important; font-weight: bold !important;'; secretTd.insertBefore(nameDiv, secretTd.firstChild); } nameDiv.innerText = '[ user: ' + uName + ' ]'; } } 
-        else { var firstCell = row.firstElementChild; if (firstCell && !firstCell.contains(secInp)) { var span = firstCell.querySelector('.telemt-user-col-text'); if (!span) { span = document.createElement('span'); span.className = 'telemt-user-col-text'; span.style.cssText = 'color: #005ce6 !important; font-weight: bold !important;'; firstCell.innerHTML = ''; firstCell.appendChild(span); } span.innerText = uName; } }
+        var secretTd = secInp.closest('td');
+        if (secretTd) {
+            var nameDiv = secretTd.querySelector('.telemt-fallback-name');
+            if (!nameDiv) { nameDiv = document.createElement('div'); nameDiv.className = 'telemt-fallback-name telemt-user-col-text'; nameDiv.style.cssText = 'margin-bottom: 6px; font-size: 1.1em; font-family: monospace; display: block; color: #005ce6 !important; font-weight: bold !important;'; secretTd.insertBefore(nameDiv, secretTd.firstChild); }
+            nameDiv.innerText = '[ user: ' + uName + ' ]'; 
+        }
         
         if(secInp) {
             if(secInp.value.trim() === "") { secInp.value = genRandHex(); secInp.dispatchEvent(new Event('change', {bubbles: true})); }

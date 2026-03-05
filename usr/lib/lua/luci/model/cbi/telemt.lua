@@ -1,6 +1,6 @@
 -- ==============================================================================
 -- Telemt CBI Model (Configuration Binding Interface)
--- Version: 3.2.1-1 (API v1, Hot-Reload, Adaptive ME Pool)
+-- Version: 3.2.2-1 (API v1, Smart Hot-Reload, Action Bar Dashboard)
 -- ==============================================================================
 
 local sys = require "luci.sys"
@@ -61,7 +61,7 @@ end
 
 if is_post and http.formvalue("reset_config") == "1" then
     sys.call("logger -t telemt 'WebUI: FACTORY RESET ALL SETTINGS'")
-    local default_uci = "config telemt 'general'\n\toption enabled '0'\n\toption mode 'tls'\n\toption domain 'google.com'\n\toption port '4443'\n\toption metrics_port '9092'\n\toption api_port '9091'\n\toption minimal_runtime_enabled '1'\n\toption metrics_allow_lo '1'\n\toption metrics_allow_lan '1'\n\toption log_level 'normal'\n"
+    local default_uci = "config telemt 'general'\n\toption enabled '0'\n\toption mode 'tls'\n\toption domain 'google.com'\n\toption port '4443'\n\toption metrics_port '9092'\n\toption api_port '9091'\n\toption api_enabled '1'\n\toption minimal_runtime_enabled '1'\n\toption metrics_allow_lo '1'\n\toption metrics_allow_lan '1'\n\toption log_level 'normal'\n"
     local f = io.open("/etc/config/telemt", "w")
     if f then f:write(default_uci); f:close() end
     sys.call("rm -f /var/etc/telemt.toml")
@@ -72,9 +72,18 @@ if is_post and http.formvalue("reset_config") == "1" then
 end
 
 if is_post and http.formvalue("reset_stats") == "1" then sys.call("logger -t telemt 'WebUI: Executed manual Reset Traffic Stats'; rm -f /tmp/telemt_stats.txt") end
+
+-- Safe specific process kill logic
+local safe_kill_cmd = "/etc/init.d/telemt run_save_stats 2>/dev/null; /etc/init.d/telemt stop 2>/dev/null; t_pid=$(pidof telemt | awk '{print $1}'); [ -n \"$t_pid\" ] && kill -9 \"$t_pid\" 2>/dev/null"
+
 if is_post and http.formvalue("start") == "1" then sys.call("logger -t telemt 'WebUI: Manual START service requested'; /etc/init.d/telemt start") end
-if is_post and http.formvalue("stop") == "1" then sys.call("logger -t telemt 'WebUI: Manual STOP service requested'; /etc/init.d/telemt run_save_stats; /etc/init.d/telemt stop; sleep 1; pidof telemt >/dev/null && killall -9 telemt 2>/dev/null") end
-if is_post and http.formvalue("restart") == "1" then sys.call("logger -t telemt 'WebUI: Manual RESTART service requested'; /etc/init.d/telemt run_save_stats; /etc/init.d/telemt stop; sleep 1; pidof telemt >/dev/null && killall -9 telemt 2>/dev/null; /etc/init.d/telemt start") end
+if is_post and http.formvalue("stop") == "1" then sys.call("logger -t telemt 'WebUI: Manual STOP service requested'; " .. safe_kill_cmd) end
+if is_post and http.formvalue("restart") == "1" then sys.call("logger -t telemt 'WebUI: Manual RESTART service requested'; " .. safe_kill_cmd .. "; /etc/init.d/telemt start") end
+
+-- Bot Process Controls
+if is_post and http.formvalue("start_bot") == "1" then sys.call("logger -t telemt 'WebUI: Manual START Bot requested'; /etc/init.d/telemt_bot start") end
+if is_post and http.formvalue("stop_bot") == "1" then sys.call("logger -t telemt 'WebUI: Manual STOP Bot requested'; /etc/init.d/telemt_bot stop") end
+if is_post and http.formvalue("restart_bot") == "1" then sys.call("logger -t telemt 'WebUI: Manual RESTART Bot requested'; /etc/init.d/telemt_bot restart") end
 
 if is_post and http.formvalue("export_config") == "1" then
     local conf = read_file("/var/etc/telemt.toml")
@@ -107,7 +116,9 @@ if http.formvalue("get_metrics") == "1" then
     local metrics = ""
     if sys.call("pidof telemt >/dev/null 2>&1") == 0 then
         local fetch_cmd = (fetch_bin == "wget") and "wget -q --timeout=3 -O -" or "uclient-fetch -q --timeout=3 -O -"
-        metrics = sys.exec(string.format("%s 'http://127.0.0.1:%d/metrics' 2>/dev/null", fetch_cmd, m_port) .. " | grep -E '^telemt_user|^telemt_uptime|^telemt_connections|^telemt_desync'") or ""
+        metrics = sys.exec(string.format("%s 'http://127.0.0.1:%d/metrics' 2>/dev/null", fetch_cmd, m_port) .. " | grep -E '^telemt_user|^telemt_uptime|^telemt_connections|^telemt_desync|^telemt_upstream_connect'") or ""
+        local scanners = sys.exec(string.format("%s 'http://127.0.0.1:%d/beobachten' 2>/dev/null", fetch_cmd, m_port) .. " | grep -cE '^[0-9a-fA-F:\\.]+'") or "0"
+        metrics = metrics .. "\ntelemt_active_scanners_count " .. scanners:gsub("%s+", "") .. "\n"
     end
     local f = io.open("/tmp/telemt_stats.txt", "r")
     if f then metrics = metrics .. "\n# ACCUMULATED\n"; for line in f:lines() do local u, tx, rx = line:match("^(%S+) (%S+) (%S+)$"); if u then metrics = metrics .. string.format("telemt_accumulated_tx{user=\"%s\"} %s\ntelemt_accumulated_rx{user=\"%s\"} %s\n", u, tx, u, rx) end end; f:close() end
@@ -127,7 +138,6 @@ if http.formvalue("get_scanners") == "1" then
 end
 
 if http.formvalue("get_log") == "1" then
-    -- Strictly 3.1.3 logic: BusyBox logread with -e filters instantly
     http.prepare_content("text/plain")
     local cmd = "logread -e 'telemt' | tail -n 50 2>/dev/null"
     if has_cmd("timeout") then cmd = "timeout 2 " .. cmd end
@@ -207,7 +217,7 @@ if not is_ajax then
     else bin_info = string.format("<small style='opacity: 0.6;'>%s (v%s)</small>", bin_path, (read_file("/var/etc/telemt.version"):gsub("%s+", "")) == "" and "unknown" or (read_file("/var/etc/telemt.version"):gsub("%s+", ""))) end
 end
 
-m = Map("telemt", "Telegram Proxy (MTProto)", [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.2.1-1</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.2.1+</span>]])
+m = Map("telemt", "Telegram Proxy (MTProto)", [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.2.2-1</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.2.1+</span>]])
 m.on_commit = function(self) sys.call("logger -t telemt 'WebUI: Config saved. Dumping stats before procd reload...'; /etc/init.d/telemt run_save_stats 2>/dev/null") end
 
 s = m:section(NamedSection, "general", "telemt")
@@ -307,6 +317,7 @@ ut:value("direct", "Direct"); ut:value("socks4", "SOCKS4"); ut:value("socks5", "
 
 local ua = s_up:option(Value, "address", "Address" .. tip("Format: IP:PORT or HOST:PORT. No hyphens allowed."))
 ua.datatype = "hostport"; ua:depends("type", "socks4"); ua:depends("type", "socks5")
+ua.placeholder = "e.g. 192.168.1.100:1080"
 function ua.validate(self, v) if v and v ~= "" and not v:match("^[A-Za-z0-9%.%:]+$") then return nil, "Invalid characters! No hyphens allowed." end return v end
 
 local uu = s_up:option(Value, "username", "Username" .. tip("Optional. Latin letters and numbers only, no hyphens."))
@@ -366,8 +377,9 @@ s:taboption("advanced", Value, "tm_ack", "ACK" .. tip("Client ACK timeout in sec
 s:taboption("advanced", Value, "replay_window_secs", "Replay Window (sec)" .. tip("Time window for replay attack protection. Default: 1800.")).default = "1800"
 
 local hmet = s:taboption("advanced", DummyValue, "_head_met"); hmet.rawhtml = true; hmet.default = "<h3 style='margin-top:20px;'>Metrics & Control API</h3>"
-local mport = s:taboption("advanced", Value, "metrics_port", "Prometheus Port" .. tip("Port for internal Prometheus exporter. Default: 9092.")); mport.datatype = "port"; mport.default = "9092"
+local api_en = s:taboption("advanced", Flag, "api_enabled", "Enable REST API v1" .. tip("Critically required for the Telegram Bot operation and external JSON monitoring.")); api_en.default = "1"
 local aport = s:taboption("advanced", Value, "api_port", "Control API Port" .. tip("Port for the new REST API (v1). Default: 9091.")); aport.datatype = "port"; aport.default = "9091"
+local mport = s:taboption("advanced", Value, "metrics_port", "Prometheus Port" .. tip("Port for internal Prometheus exporter. Default: 9092.")); mport.datatype = "port"; mport.default = "9092"
 s:taboption("advanced", Flag, "minimal_runtime_enabled", "Enable Minimal Runtime" .. tip("Provides heavy JSON snapshots on API. Required for TG Bot.")).default = "1"
 s:taboption("advanced", Flag, "metrics_allow_lo", "Allow Localhost" .. tip("Auto-allow 127.0.0.1 and ::1. Required for Live Traffic stats.")).default = "1"
 s:taboption("advanced", Flag, "metrics_allow_lan", "Allow LAN Subnet" .. tip("Auto-detect and allow your router's local network.")).default = "1"
@@ -379,6 +391,29 @@ mlink.default = string.format([[<a id="prom_link" href="#" target="_blank" class
 -- === TAB: TELEGRAM BOT ===
 local hbot = s:taboption("bot", DummyValue, "_head_bot", ""); hbot.rawhtml = true; hbot.default = "<div style='margin-bottom:15px; padding-top:10px;'><h3 style='margin-top:0;'>Autonomous Telegram Bot (Sidecar)</h3><p style='opacity:0.8; margin-top:5px; margin-bottom:0;'>Configure the autonomous local bot to monitor Telemt status, fetch stats via Telegram, and send crash alerts directly to your phone.</p></div>"
 s:taboption("bot", Flag, "bot_enabled", "Enable Bot Sidecar" .. tip("Start the autonomous monitoring script via procd.")).default = "0"
+
+-- Bot Process Status
+local bot_pid = not is_ajax and (sys.exec("pidof telemt-bot.sh | awk '{print $1}'") or ""):gsub("%s+", "") or ""
+local bot_status = "<span style='color:#d9534f; font-weight:bold;'>STOPPED</span>"
+if bot_pid ~= "" and sys.call("kill -0 " .. bot_pid .. " 2>/dev/null") == 0 then bot_status = string.format("<span style='color:green;font-weight:bold'>RUNNING (PID: %s)</span>", bot_pid) end
+local bst = s:taboption("bot", DummyValue, "_bot_status", "Bot Status"); bst.rawhtml = true; bst.value = bot_status; bst:depends("bot_enabled", "1")
+
+-- Bot Controls
+local bctrl = s:taboption("bot", DummyValue, "_bot_controls", "Bot Controls"); bctrl.rawhtml = true
+bctrl.default = string.format([[
+<div class="btn-controls">
+    <input type="button" class="cbi-button cbi-button-apply" id="btn_bot_start" value="Start Bot" />
+    <input type="button" class="cbi-button cbi-button-reset" id="btn_bot_stop" value="Stop Bot" />
+    <input type="button" class="cbi-button cbi-button-reload" id="btn_bot_restart" value="Restart Bot" />
+</div>
+<script>
+setTimeout(function(){
+    var bb1=document.getElementById('btn_bot_start'); if(bb1) bb1.addEventListener('click', function(){ logAction('Start Bot'); postAction('start_bot'); });
+    var bb2=document.getElementById('btn_bot_stop'); if(bb2) bb2.addEventListener('click', function(){ logAction('Stop Bot'); postAction('stop_bot'); });
+    var bb3=document.getElementById('btn_bot_restart'); if(bb3) bb3.addEventListener('click', function(){ logAction('Restart Bot'); postAction('restart_bot'); });
+}, 500);
+</script>]], current_url); bctrl:depends("bot_enabled", "1")
+
 local bt = s:taboption("bot", Value, "bot_token", "Bot Token" .. tip("Get it from @BotFather.")); bt.password = true; bt:depends("bot_enabled", "1")
 local bc = s:taboption("bot", Value, "bot_chat_id", "Admin Chat ID" .. tip("Your personal or group Chat ID for alerts.")); bc:depends("bot_enabled", "1")
 
@@ -441,7 +476,7 @@ s2.template = "cbi/tblsection"; s2.addremove = true; s2.anonymous = false
 s2.create = function(self, section) if not section or not section:match("^[A-Za-z0-9_]+$") or #section > 15 then return nil end; sys.call(string.format("logger -t telemt 'WebUI: Added new user -> %s'", section)); return TypedSection.create(self, section) end
 s2.remove = function(self, section) sys.call(string.format("logger -t telemt 'WebUI: Deleted user -> %s'", section)); return TypedSection.remove(self, section) end
 
-local sec = s2:option(Value, "secret", "Secret (32 hex)" .. tip("Leave empty to auto-generate.")); sec.rmempty = false; sec.datatype = "hexstring"; function sec.validate(self, value) if not value or value:gsub("%s+", "") == "" then value = (sys.exec("cat /proc/sys/kernel/random/uuid") or ""):gsub("%-", ""):gsub("%s+", ""):sub(1,32) end; if #value ~= 32 or not value:match("^[0-9a-fA-F]+$") then return nil, "Secret must be exactly 32 hex chars!" end; return value end
+local sec = s2:option(Value, "secret", "User / Secret" .. tip("Leave empty to auto-generate.")); sec.rmempty = false; sec.datatype = "hexstring"; function sec.validate(self, value) if not value or value:gsub("%s+", "") == "" then value = (sys.exec("cat /proc/sys/kernel/random/uuid") or ""):gsub("%-", ""):gsub("%s+", ""):sub(1,32) end; if #value ~= 32 or not value:match("^[0-9a-fA-F]+$") then return nil, "Secret must be exactly 32 hex chars!" end; return value end
 local u_en = s2:option(Flag, "enabled", "Active" .. tip("Uncheck to manually pause this user.")); u_en.default = "1"; u_en.rmempty = false
 local t_con = s2:option(Value, "max_tcp_conns", "TCP Conns" .. tip("Limit sessions (e.g. 50)")); t_con.datatype = "uinteger"; t_con.placeholder = "unlimited"
 local t_uips = s2:option(Value, "max_unique_ips", "Max IPs" .. tip("Max unique client IPs.")); t_uips.datatype = "uinteger"; t_uips.placeholder = "unlimited"
@@ -535,10 +570,12 @@ div[id^="cbi-telemt-advanced-_head_tm"] .cbi-value-field { width: 100% !importan
 .stat-divider, .sum-divider { color: #ccc; margin: 0 4px; }
 .btn-controls input { width: auto; margin-right: 5px; }
 
-.telemt-dash-summary { font-size:1.05em; display:flex; flex-wrap:wrap; align-items:center; flex: 1 1 auto; row-gap: 5px; }
-.telemt-dash-summary > span { margin-right: 12px; white-space: nowrap; }
+.telemt-dash-info-panel { display: flex; flex-direction: column; gap: 6px; padding: 12px; background: rgba(0,160,0,0.05); border: 1px solid rgba(0,160,0,0.2); border-radius: 6px; margin-bottom: 12px; }
+.telemt-dash-row { display: flex; flex-wrap: wrap; align-items: center; font-size: 1.05em; row-gap: 5px; }
+.telemt-dash-row > span { margin-right: 12px; white-space: nowrap; }
+.telemt-dash-action-panel { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+
 .link-btn-group { display: flex; margin-top: 4px; }
-.telemt-conns-bold { font-weight: bold; }
 
 @media screen and (min-width: 769px) {
     #cbi-telemt-user .cbi-section-table { width: 100% !important; table-layout: auto !important; }
@@ -550,12 +587,7 @@ div[id^="cbi-telemt-advanced-_head_tm"] .cbi-value-field { width: 100% !importan
     td[data-name="expire_date"] .telemt-num-wrap { min-width: 155px !important; width: 100% !important; }
     td[data-name="_link"] .link-wrapper { min-width: 160px !important; }
     td[data-name="secret"] .telemt-sec-wrap { min-width: 160px !important; }
-    .telemt-dash-btns { display: flex !important; align-items: center !important; gap: 10px !important; flex: 0 0 auto !important; margin-left: auto; }
-    .telemt-action-btns { display: flex !important; align-items: center !important; justify-content: center !important; gap: 10px !important; flex: 0 0 auto !important; }
-    .telemt-dash-btns input.cbi-button, .telemt-action-btns input.cbi-button { float: none !important; margin: 0 !important; display: inline-block !important; position: static !important; }
-    .telemt-dash-top-row { display:flex; justify-content:space-between; align-items:center; padding:12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.2); border-radius:6px; margin-bottom:15px; flex-wrap:wrap; gap:15px; }
-    .telemt-dash-bot-row { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:10px; margin-bottom:15px; text-align:center; width:100%; }
-    .telemt-dash-warn { font-size:1em; color:#d35400; font-weight:bold; text-align:center; }
+    .telemt-dash-warn { font-size:1em; color:#d35400; font-weight:bold; }
 }
 
 @media screen and (max-width: 768px) {
@@ -567,15 +599,13 @@ div[id^="cbi-telemt-advanced-_head_tm"] .cbi-value-field { width: 100% !importan
     #cbi-telemt-user .cbi-section-actions, #cbi-telemt-user td.cbi-section-actions, #cbi-telemt-user .cbi-section-table td:last-child { display: block !important; visibility: visible !important; opacity: 1 !important; padding: 10px 0 0 0 !important; overflow: visible !important; width: 100% !important; }
     html body #cbi-telemt-user .cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross), html body #cbi-telemt-user td.cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross) { display: flex !important; width: 100% !important; height: 44px !important; line-height: 44px !important; align-items: center !important; justify-content: center !important; }
     .user-flat-stat, .user-flat-stat > div { flex-direction: column; align-items: flex-start; flex-wrap: wrap !important; }
-    .telemt-dash-summary { flex-direction: column; align-items: flex-start; }
-    .telemt-dash-summary > span { margin-right: 0 !important; margin-bottom: 6px !important; display: block !important; width: 100% !important; white-space: normal !important; }
+    .telemt-dash-row { flex-direction: column; align-items: flex-start; }
+    .telemt-dash-row > span { margin-right: 0 !important; margin-bottom: 6px !important; display: block !important; width: 100% !important; white-space: normal !important; }
     .stat-divider, .sum-divider { display: none !important; }
-    .telemt-dash-btns, .telemt-action-btns { flex-direction: column; width: 100%; gap: 8px !important; margin-top:10px; }
-    .telemt-dash-btns input.cbi-button, .telemt-action-btns input.cbi-button { width: 100% !important; height: 36px !important; }
+    .telemt-dash-action-panel { flex-direction: column; width: 100%; gap: 8px !important; }
+    .telemt-dash-action-panel input.cbi-button { width: 100% !important; height: 36px !important; }
     .link-btn-group { flex-direction: row !important; width: 100%; display: flex; margin-top: 5px; }
     .telemt-sec-btns input.cbi-button, .link-btn-group input.cbi-button { height: 32px !important; min-height: 32px !important; line-height: 30px !important; font-size: 13px !important; margin-right: 5px; }
-    .telemt-dash-top-row { display:flex; flex-direction:column; padding:12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.2); border-radius:6px; margin-bottom:15px; }
-    .telemt-dash-bot-row { display:flex; flex-direction:column; margin-bottom:15px; gap:15px; text-align:center; }
 }
 
 /* DARK CSV MODAL */
@@ -615,6 +645,16 @@ function updateCascadesState() {
         } else {
             masterSwitch.disabled = false; masterSwitch.title = "";
         }
+        var isMasterOn = masterSwitch.checked;
+        upRows.forEach(function(row) {
+            row.style.transition = "opacity 0.3s ease";
+            row.style.opacity = isMasterOn ? "1" : "0.4";
+            row.style.pointerEvents = isMasterOn ? "auto" : "none";
+        });
+        if(!masterSwitch.dataset.bound) {
+            masterSwitch.dataset.bound = "1";
+            masterSwitch.addEventListener('change', updateCascadesState);
+        }
     }
 }
 
@@ -627,23 +667,31 @@ function fetchMetrics() {
         txt = cleanResponse(txt || ""); 
         
         var userStats = {}; var allUserRows = document.querySelectorAll('.user-flat-stat');
-        allUserRows.forEach(function(statEl) { var u = statEl.getAttribute('data-user'); if(u) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0 }; });
+        allUserRows.forEach(function(statEl) { var u = statEl.getAttribute('data-user'); if(u) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0, ip_cur: 0, ip_lim: 0 }; });
         
-        var globalStatsObj = { uptime: 0, dpi: 0 }; var totalLiveRx = 0, totalLiveTx = 0, totalAccRx = 0, totalAccTx = 0;
+        var globalStatsObj = { uptime: 0, dpi: 0, up_ok: 0, up_fail: 0, scanners: 0 }; 
+        var totalLiveRx = 0, totalLiveTx = 0, totalAccRx = 0, totalAccTx = 0;
+        
         var lines = txt.split('\n');
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim(); if (line.indexOf('#') === 0 || line === "") continue;
             if (line.indexOf('telemt_uptime_seconds') === 0) { var m = line.match(/\s+([0-9\.eE\+\-]+)/); if(m) globalStatsObj.uptime = parseFloat(m[1]); continue; }
             if (line.indexOf('telemt_desync_total') === 0) { var m = line.match(/\s+([0-9\.eE\+\-]+)/); if(m) globalStatsObj.dpi += parseFloat(m[1]); continue; }
+            if (line.indexOf('telemt_upstream_connect_success_total') === 0) { var m = line.match(/\s+([0-9\.eE\+\-]+)/); if(m) globalStatsObj.up_ok = parseFloat(m[1]); continue; }
+            if (line.indexOf('telemt_upstream_connect_fail_total') === 0) { var m = line.match(/\s+([0-9\.eE\+\-]+)/); if(m) globalStatsObj.up_fail = parseFloat(m[1]); continue; }
+            if (line.indexOf('telemt_active_scanners_count') === 0) { var m = line.match(/\s+([0-9]+)/); if(m) globalStatsObj.scanners = parseInt(m[1]); continue; }
+            
             var userMatch = line.match(/user="([^"]+)"/);
             if (userMatch) {
-                var u = userMatch[1]; if (!userStats[u]) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0 };
+                var u = userMatch[1]; if (!userStats[u]) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0, ip_cur: 0, ip_lim: 0 };
                 var valMatch = line.match(/\}\s+([0-9\.eE\+\-]+)/);
                 if (valMatch) {
                     var val = parseFloat(valMatch[1]);
                     if (line.indexOf('telemt_user_octets_from_client') > -1) { userStats[u].live_rx = val; totalLiveRx += val; }
                     else if (line.indexOf('telemt_user_octets_to_client') > -1) { userStats[u].live_tx = val; totalLiveTx += val; }
                     else if (line.indexOf('telemt_user_connections_current') > -1) { userStats[u].conns = val; }
+                    else if (line.indexOf('telemt_user_unique_ips_current') > -1) { userStats[u].ip_cur = val; }
+                    else if (line.indexOf('telemt_user_unique_ips_limit') > -1) { userStats[u].ip_lim = val; }
                     else if (line.indexOf('telemt_accumulated_rx') > -1) { userStats[u].acc_rx = val; totalAccRx += val; }
                     else if (line.indexOf('telemt_accumulated_tx') > -1) { userStats[u].acc_tx = val; totalAccTx += val; }
                 }
@@ -653,7 +701,7 @@ function fetchMetrics() {
         var totalConfiguredUsers = allUserRows.length; var usersOnline = 0;
         
         allUserRows.forEach(function(statEl) {
-            var u = statEl.getAttribute('data-user'); var stat = userStats[u] || { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0 };
+            var u = statEl.getAttribute('data-user'); var stat = userStats[u] || { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0, ip_cur: 0, ip_lim: 0 };
             var finalTx = stat.live_tx + stat.acc_tx; var finalRx = stat.live_rx + stat.acc_rx; if (stat.conns > 0) usersOnline++;
             
             var qStr = statEl.getAttribute('data-q'); var eStr = statEl.getAttribute('data-e'); var isEn = statEl.getAttribute('data-en');
@@ -693,18 +741,26 @@ function fetchMetrics() {
             
             var c_col = stat.conns > 0 ? "#00a000" : "#888"; 
             var dotUser = "<svg width='10' height='10' style='vertical-align:middle;'><circle cx='5' cy='5' r='5' fill='" + c_col + "'/></svg>";
-            statEl.innerHTML = "<div style='display:flex; align-items:center; gap:4px; margin-bottom:2px; flex-wrap:wrap;'><span style='white-space:nowrap; color:#00a000;'>&darr; " + formatMB(finalTx) + "</span> <span class='stat-divider'>/</span> <span style='white-space:nowrap; color:#d35400;'>&uarr; " + formatMB(finalRx) + "</span> <span class='stat-divider'>|</span> <span style='white-space:nowrap; color:" + c_col + "; display:inline-flex; align-items:center;'>" + dotUser + "&nbsp;" + stat.conns + "&nbsp;<small style='margin-left:3px; font-weight:normal;'>conns</small></span></div>";
+            var ipAlert = ""; if (stat.ip_lim > 0 && stat.ip_cur >= stat.ip_lim) { ipAlert = "<span class='stat-divider'>|</span> <span style='color:#d35400; font-weight:bold; font-size:0.9em;'>&#9888; IPs: " + stat.ip_cur + "/" + stat.ip_lim + "</span>"; }
+            statEl.innerHTML = "<div style='display:flex; align-items:center; gap:4px; margin-bottom:2px; flex-wrap:wrap;'><span style='white-space:nowrap; color:#00a000;'>&darr; " + formatMB(finalTx) + "</span> <span class='stat-divider'>/</span> <span style='white-space:nowrap; color:#d35400;'>&uarr; " + formatMB(finalRx) + "</span> <span class='stat-divider'>|</span> <span style='white-space:nowrap; color:" + c_col + "; display:inline-flex; align-items:center;'>" + dotUser + "&nbsp;" + stat.conns + "</span>" + ipAlert + "</div>";
         });
         
         var now = Date.now(); var speedDL = 0, speedUL = 0; 
         if (!window._telemtLastTime) { window._telemtLastTime = now; window._telemtLastTotalRx = totalRx; window._telemtLastTotalTx = totalTx; } 
         else { var diffSec = (now - window._telemtLastTime) / 1000.0; if (diffSec > 0) { var dRx = totalRx - window._telemtLastTotalRx; var dTx = totalTx - window._telemtLastTotalTx; if (dRx >= 0) speedUL = (dRx * 8) / 1048576 / diffSec; if (dTx >= 0) speedDL = (dTx * 8) / 1048576 / diffSec; } window._telemtLastTime = now; window._telemtLastTotalRx = totalRx; window._telemtLastTotalTx = totalTx; }
         
-        var sumEl = document.getElementById('telemt_users_summary_inner');
-        if (sumEl) {
-            var dpiHtml = "<span class='sum-divider'>|</span><span><span style='font-weight:bold; color:#555;'>DPI Probes:</span> <span style='color:" + (globalStatsObj.dpi > 0 ? "#d9534f" : "#00a000") + "; font-weight:bold; margin-left:4px;'>" + globalStatsObj.dpi + "</span></span>";
-            if (txt.trim() === "") { sumEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>Status: Offline</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#888; margin-left:4px;'>0</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>" + dpiHtml; } 
-            else { sumEl.innerHTML = "<b style='margin-right:6px;'>Uptime:</b><span style='color:#666;'>" + formatUptime(globalStatsObj.uptime) + "</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Bandwidth:</b> <span style='color:#00a000;'>&darr; " + speedDL.toFixed(2) + "</span> <span style='color:#d35400; margin-left:4px;'>&uarr; " + speedUL.toFixed(2) + "</span> <small>Mbps</small></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#00a000; margin-left:4px;'>" + usersOnline + "</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>" + dpiHtml; }
+        var row1El = document.getElementById('telemt_dash_row1');
+        var row2El = document.getElementById('telemt_dash_row2');
+        if (row1El && row2El) {
+            if (txt.trim() === "") { 
+                row1El.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>Status: Offline</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#888; margin-left:4px;'>0</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>"; 
+                row2El.innerHTML = "";
+            } else { 
+                row1El.innerHTML = "<b style='margin-right:6px;'>Uptime:</b><span style='color:#666;'>" + formatUptime(globalStatsObj.uptime) + "</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Speed:</b> <span style='color:#00a000;'>&darr; " + speedDL.toFixed(2) + "</span> <span style='color:#d35400; margin-left:4px;'>&uarr; " + speedUL.toFixed(2) + "</span> <small>Mbps</small></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#00a000; margin-left:4px;'>" + usersOnline + "</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>"; 
+                
+                var scanCol = globalStatsObj.scanners > 0 ? "#d9534f" : "#00a000";
+                row2El.innerHTML = "<span><b style='color:#555;'>Upstream Health:</b> <span style='color:#00a000; font-weight:bold; margin-left:4px;'>&#128994; " + globalStatsObj.up_ok + " OK</span> <span class='sum-divider'>/</span> <span style='color:#d9534f; font-weight:bold;'>&#128308; " + globalStatsObj.up_fail + " Fails</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>DPI Probes:</b> <span style='color:" + (globalStatsObj.dpi > 0 ? "#d9534f" : "#00a000") + "; font-weight:bold; margin-left:4px;'>" + globalStatsObj.dpi + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Active Scanners:</b> <span style='color:" + scanCol + "; font-weight:bold; margin-left:4px;'>" + globalStatsObj.scanners + "</span></span>";
+            }
         }
     }).catch(() => { window._telemtFetching = false; });
 }
@@ -778,18 +834,21 @@ function fixTabIsolation() {
         
         if (!document.getElementById('telemt_users_dashboard_panel')) {
             var dash = document.createElement('div'); dash.id = 'telemt_users_dashboard_panel';
-            var topRow = document.createElement('div'); topRow.className = 'telemt-dash-top-row';
-            var sumInner = document.createElement('div'); sumInner.id = 'telemt_users_summary_inner'; sumInner.className = 'telemt-dash-summary'; topRow.appendChild(sumInner);
-            var btnsTop = document.createElement('div'); btnsTop.className = 'telemt-dash-btns';
-            var btnExpStat = document.createElement('input'); btnExpStat.type = 'button'; btnExpStat.className = 'cbi-button cbi-button-apply'; btnExpStat.value = 'Export Stats'; btnExpStat.addEventListener('click', doExportStats); btnsTop.appendChild(btnExpStat);
-            var btnRstStat = document.createElement('input'); btnRstStat.type = 'button'; btnRstStat.className = 'cbi-button cbi-button-remove'; btnRstStat.value = 'Reset Traffic Stats'; btnRstStat.addEventListener('click', function() { if(confirm('Clear RAM stats?')) { logAction('Reset Stats'); postAction('reset_stats'); } }); btnsTop.appendChild(btnRstStat);
-            topRow.appendChild(btnsTop); dash.appendChild(topRow);
+            
+            // Row 1 & 2 Info Panel
+            var infoPanel = document.createElement('div'); infoPanel.className = 'telemt-dash-info-panel';
+            var row1 = document.createElement('div'); row1.id = 'telemt_dash_row1'; row1.className = 'telemt-dash-row';
+            var row2 = document.createElement('div'); row2.id = 'telemt_dash_row2'; row2.className = 'telemt-dash-row';
+            infoPanel.appendChild(row1); infoPanel.appendChild(row2);
+            dash.appendChild(infoPanel);
 
-            var botRow = document.createElement('div'); botRow.className = 'telemt-dash-bot-row';
-            var btnsBot = document.createElement('div'); btnsBot.className = 'telemt-action-btns';
-            var btnExpCsv = document.createElement('input'); btnExpCsv.type = 'button'; btnExpCsv.className = 'cbi-button cbi-button-action'; btnExpCsv.value = 'Export Users (CSV)'; btnExpCsv.addEventListener('click', doExportCSV); btnsBot.appendChild(btnExpCsv);
-            var btnImpCsv = document.createElement('input'); btnImpCsv.type = 'button'; btnImpCsv.className = 'cbi-button cbi-button-apply'; btnImpCsv.value = 'Import Users (CSV)'; btnImpCsv.addEventListener('click', showImportModal); btnsBot.appendChild(btnImpCsv);
-            botRow.appendChild(btnsBot); dash.appendChild(botRow);
+            // Action Buttons Panel
+            var actionPanel = document.createElement('div'); actionPanel.className = 'telemt-dash-action-panel';
+            var btnExpStat = document.createElement('input'); btnExpStat.type = 'button'; btnExpStat.className = 'cbi-button cbi-button-apply'; btnExpStat.value = 'Export Stats'; btnExpStat.addEventListener('click', doExportStats); actionPanel.appendChild(btnExpStat);
+            var btnRstStat = document.createElement('input'); btnRstStat.type = 'button'; btnRstStat.className = 'cbi-button cbi-button-remove'; btnRstStat.value = 'Reset Traffic Stats'; btnRstStat.addEventListener('click', function() { if(confirm('Clear RAM stats?')) { logAction('Reset Stats'); postAction('reset_stats'); } }); actionPanel.appendChild(btnRstStat);
+            var btnImpCsv = document.createElement('input'); btnImpCsv.type = 'button'; btnImpCsv.className = 'cbi-button cbi-button-action'; btnImpCsv.value = 'Import CSV'; btnImpCsv.addEventListener('click', showImportModal); actionPanel.appendChild(btnImpCsv);
+            var btnExpCsv = document.createElement('input'); btnExpCsv.type = 'button'; btnExpCsv.className = 'cbi-button cbi-button-action'; btnExpCsv.value = 'Export CSV'; btnExpCsv.addEventListener('click', doExportCSV); actionPanel.appendChild(btnExpCsv);
+            dash.appendChild(actionPanel);
             
             var warnMsg = document.createElement('div'); warnMsg.className = 'telemt-dash-warn'; warnMsg.innerText = 'Important: You must create at least one active user for the proxy to start!'; dash.appendChild(warnMsg);
             userTarget.insertBefore(dash, userTable);
@@ -822,66 +881,31 @@ function injectUI() {
     var ipFlds = []; var m1 = document.querySelector('input[name*="cbid.telemt.general.external_ip"]'); if(m1) ipFlds.push(m1); var m2 = document.getElementById('telemt_mirror_ip'); if(m2) ipFlds.push(m2);
     ipFlds.forEach(function(ipFld) { if(!ipFld.dataset.refBtnInjected && ipFld.type !== "hidden") { ipFld.dataset.refBtnInjected = "1"; if(ipFld.parentNode) { ipFld.parentNode.style.display = 'flex'; ipFld.parentNode.style.alignItems = 'center'; var btn = document.createElement('input'); btn.type = 'button'; btn.className = 'cbi-button cbi-button-neural'; btn.value = 'Get IP'; btn.style.marginLeft = '5px'; btn.style.padding = '0 10px'; btn.style.height = ipFld.offsetHeight > 0 ? ipFld.offsetHeight + 'px' : '32px'; btn.addEventListener('click', function(){ fetchIPViaWget(this); }); ipFld.parentNode.appendChild(btn); } } });
 
-    // COLLAPSIBLE CASCADE CARDS & DYNAMIC TITLE (Event Delegation approach)
     document.querySelectorAll('#cbi-telemt-upstream .cbi-section-node:not([id*="-template"])').forEach(function(row, index) {
         if (!row.dataset.cascadeInjected) {
             row.dataset.cascadeInjected = "1";
-            
             var header = document.createElement('div');
             header.className = 'telemt-cascade-header';
             header.style.cssText = 'font-size:1.1em; font-weight:bold; color:#00a000; margin-bottom:15px; border-bottom:1px dashed rgba(0,160,0,0.4); padding-bottom:4px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; user-select:none;';
-            
-            var titleSpan = document.createElement('span');
-            header.appendChild(titleSpan);
-            var toggleSpan = document.createElement('span');
-            toggleSpan.innerHTML = '&#9660;';
-            header.appendChild(toggleSpan);
+            var titleSpan = document.createElement('span'); header.appendChild(titleSpan);
+            var toggleSpan = document.createElement('span'); toggleSpan.innerHTML = '&#9660;'; header.appendChild(toggleSpan);
             row.insertBefore(header, row.firstChild);
             
             var updateTitle = function() {
-                var nInp = row.querySelector('input[name*=".alias"]');
-                var aInp = row.querySelector('input[name*=".address"]');
-                var vName = (nInp && nInp.value.trim() !== "") ? nInp.value.trim() : '';
-                var vAddr = (aInp && aInp.value.trim() !== "") ? aInp.value.trim() : '';
-                
+                var nInp = row.querySelector('input[name*=".alias"]'); var aInp = row.querySelector('input[name*=".address"]');
+                var vName = (nInp && nInp.value.trim() !== "") ? nInp.value.trim() : ''; var vAddr = (aInp && aInp.value.trim() !== "") ? aInp.value.trim() : '';
                 var text = 'Cascade #' + (index + 1);
-                if (vName || vAddr) {
-                    text += ' — ' + escHTML(vName ? vName : 'Unnamed');
-                    if (vAddr) text += ' <span style="color:#888; font-weight:normal; font-size:0.9em;">(' + escHTML(vAddr) + ')</span>';
-                }
+                if (vName || vAddr) { text += ' — ' + escHTML(vName ? vName : 'Unnamed'); if (vAddr) text += ' <span style="color:#888; font-weight:normal; font-size:0.9em;">(' + escHTML(vAddr) + ')</span>'; }
                 titleSpan.innerHTML = text;
             };
-            
             setTimeout(updateTitle, 100);
-            row.addEventListener('input', function(e) {
-                if(e.target && e.target.tagName === 'INPUT') { updateTitle(); }
-            });
-            
+            row.addEventListener('input', function(e) { if(e.target && e.target.tagName === 'INPUT') { updateTitle(); } });
             var fields = Array.from(row.children).filter(function(child) { return child !== header && !child.classList.contains('cbi-section-remove'); });
-            header.addEventListener('click', function(e) {
-                var isHidden = fields[0].style.display === 'none';
-                fields.forEach(function(f) { f.style.display = isHidden ? '' : 'none'; });
-                toggleSpan.innerHTML = isHidden ? '&#9660;' : '&#9654;';
-            });
+            header.addEventListener('click', function(e) { var isHidden = fields[0].style.display === 'none'; fields.forEach(function(f) { f.style.display = isHidden ? '' : 'none'; }); toggleSpan.innerHTML = isHidden ? '&#9660;' : '&#9654;'; });
             
-            var parent = row.parentElement;
-            var rmDiv = parent ? (parent.querySelector(':scope > .cbi-section-remove') || null) : null;
-            if (!rmDiv) {
-                var sib = row.nextElementSibling;
-                while (sib) {
-                    if (sib.classList && sib.classList.contains('cbi-section-remove')) { rmDiv = sib; break; }
-                    sib = sib.nextElementSibling;
-                }
-            }
-            if (rmDiv) {
-                row.appendChild(rmDiv);
-                rmDiv.style.textAlign = 'left';
-                rmDiv.style.marginTop = '15px';
-                rmDiv.style.paddingTop = '15px';
-                rmDiv.style.borderTop = '1px dashed var(--border-color, rgba(128,128,128,0.3))';
-                var btnInput = rmDiv.querySelector('.cbi-button');
-                if (btnInput) { btnInput.style.float = 'none'; btnInput.style.display = 'inline-block'; }
-            }
+            var parent = row.parentElement; var rmDiv = parent ? (parent.querySelector(':scope > .cbi-section-remove') || null) : null;
+            if (!rmDiv) { var sib = row.nextElementSibling; while (sib) { if (sib.classList && sib.classList.contains('cbi-section-remove')) { rmDiv = sib; break; } sib = sib.nextElementSibling; } }
+            if (rmDiv) { row.appendChild(rmDiv); rmDiv.style.textAlign = 'left'; rmDiv.style.marginTop = '15px'; rmDiv.style.paddingTop = '15px'; rmDiv.style.borderTop = '1px dashed var(--border-color, rgba(128,128,128,0.3))'; var btnInput = rmDiv.querySelector('.cbi-button'); if (btnInput) { btnInput.style.float = 'none'; btnInput.style.display = 'inline-block'; } }
         }
     });
 
@@ -894,18 +918,10 @@ function injectUI() {
         
         if (is_owrt25) {
             var secretTd = secInp.closest('td');
-            if (secretTd) {
-                var nameDiv = secretTd.querySelector('.telemt-fallback-name');
-                if (!nameDiv) { nameDiv = document.createElement('div'); nameDiv.className = 'telemt-fallback-name telemt-user-col-text'; nameDiv.style.cssText = 'margin-bottom: 6px; font-size: 1.1em; font-family: monospace; display: block; color: #005ce6 !important; font-weight: bold !important;'; secretTd.insertBefore(nameDiv, secretTd.firstChild); }
-                nameDiv.innerText = '[ user: ' + uName + ' ]'; 
-            }
+            if (secretTd) { var nameDiv = secretTd.querySelector('.telemt-fallback-name'); if (!nameDiv) { nameDiv = document.createElement('div'); nameDiv.className = 'telemt-fallback-name telemt-user-col-text'; nameDiv.style.cssText = 'margin-bottom: 6px; font-size: 1.1em; font-family: monospace; display: block; color: #005ce6 !important; font-weight: bold !important;'; secretTd.insertBefore(nameDiv, secretTd.firstChild); } nameDiv.innerText = '[ user: ' + uName + ' ]'; }
         } else {
             var firstCell = row.firstElementChild;
-            if (firstCell && !firstCell.contains(secInp)) {
-                var span = firstCell.querySelector('.telemt-user-col-text');
-                if (!span) { span = document.createElement('span'); span.className = 'telemt-user-col-text'; span.style.cssText = 'color: #005ce6 !important; font-weight: bold !important; margin-bottom: 4px; display: block;'; firstCell.insertBefore(span, firstCell.firstChild); }
-                span.innerText = uName;
-            }
+            if (firstCell && !firstCell.contains(secInp)) { var span = firstCell.querySelector('.telemt-user-col-text'); if (!span) { span = document.createElement('span'); span.className = 'telemt-user-col-text'; span.style.cssText = 'color: #005ce6 !important; font-weight: bold !important; margin-bottom: 4px; display: block;'; firstCell.insertBefore(span, firstCell.firstChild); } span.innerText = uName; }
         }
         
         if(secInp) {
@@ -916,23 +932,11 @@ function injectUI() {
         }
         
         var cb = row.querySelector('input[type="checkbox"][name*=".enabled"]');
-        if (cb) { 
-            cb.addEventListener('change', function(e) { 
-                logToRouter("User " + uName + " manually " + (e.target.checked ? "Resumed" : "Paused")); 
-            }); 
-        }
+        if (cb) { cb.addEventListener('change', function(e) { logToRouter("User " + uName + " manually " + (e.target.checked ? "Resumed" : "Paused")); }); }
         
         niList.forEach(function(ni){
             var propName = ni.name.match(/([^\.]+)$/); var fName = propName ? propName[1] : "limit";
-            ni.addEventListener('change', function(e) { 
-                logToRouter("User " + uName + " " + fName + " changed to: " + (e.target.value || "unlimited")); 
-                if (fName === 'expire_date' || fName === 'data_quota') {
-                    if (cb && !cb.checked) {
-                        cb.checked = true;
-                        logToRouter("User " + uName + " auto-resumed due to " + fName + " update");
-                    }
-                }
-            });
+            ni.addEventListener('change', function(e) { logToRouter("User " + uName + " " + fName + " changed to: " + (e.target.value || "unlimited")); if (fName === 'expire_date' || fName === 'data_quota') { if (cb && !cb.checked) { cb.checked = true; logToRouter("User " + uName + " auto-resumed due to " + fName + " update"); } } });
             var wrapper = document.createElement('div'); wrapper.className = 'telemt-num-wrap'; ni.parentNode.insertBefore(wrapper, ni); wrapper.appendChild(ni);
             if(ni.name.indexOf('expire_date') !== -1) {
                 var calContainer = document.createElement('div'); calContainer.className = 'telemt-cal-wrap'; var calBtn = document.createElement('input'); calBtn.type = 'button'; calBtn.className = 'cbi-button cbi-button-action telemt-btn-cal'; calBtn.title = 'Select Date'; calBtn.value = ' ';

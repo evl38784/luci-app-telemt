@@ -1,11 +1,13 @@
 -- ==============================================================================
 -- Telemt LuCI Controller
--- Registers the application inside OpenWrt's main navigation tree.
+-- Provides backward compatibility for OpenWrt 21.02 and 22.03 menu generation
 -- ==============================================================================
+
 module("luci.controller.telemt", package.seeall)
 
 function index()
-    -- Mounts the CBI model at 'Admin -> Services -> Telemt MTProxy' with sorting weight 50.
-    entry({"admin", "services", "telemt"}, cbi("telemt"), _("Telemt MTProxy"), 50).dependent = true
+    -- Register the menu entry under Services -> Telemt Proxy unconditionally
+    local page = entry({"admin", "services", "telemt"}, cbi("telemt"), _("Telemt Proxy"), 90)
+    page.dependent = true
+    page.acl_depends = { "luci-app-telemt" }
 end
-

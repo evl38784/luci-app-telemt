@@ -3,8 +3,13 @@ name: Build and Release OpenWrt Packages
 on:
   push:
     tags:
-      - 'v*' # Triggers only on tag creation (e.g., v3.3.10)
+      - 'v*' # Triggers automatically on tag creation (e.g., v3.3.10)
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Enter tag for manual release (e.g., v3.3.10)'
+        required: true
+        default: 'v3.3.10'
 
 # IMPORTANT: Allow the action to write to the repository to create releases
 permissions:
@@ -16,6 +21,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # Определяем тег (из ручного ввода или из автоматического триггера)
+      - name: Determine Tag
+        id: vars
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
 
       - name: Setup nFPM
         run: |
@@ -40,9 +55,11 @@ jobs:
       # MAGIC HAPPENS HERE: Create a release and attach the files
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') # Failsafe: only create release if triggered by a tag
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           files: |
             *.ipk
             *.apk
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
           generate_release_notes: true # Automatically append commit history to release notes

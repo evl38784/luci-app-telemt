@@ -1,19 +1,29 @@
+# ==============================================================================
+# nFPM Build Configuration
+# Defines package metadata, architecture, and dependencies for IPK/APK builds.
+# ==============================================================================
 name: "luci-app-telemt"
 platform: "linux"
-version: "3.2.2-1"
+version: "3.3.10"
 section: "net"
 maintainer: "Medvedolog <Medvedolog@github.com>"
-description: "LuCI WebUI for Telemt MTProxy. Manages core and bot."
+description: |
+  LuCI WebUI for Telemt MTProxy (v3.3.10 LTS).
+  Features: Adaptive Hybrid Dashboard.
 depends:
+  - libc
   - luci-base
   - luci-compat
   - qrencode
+  - ca-bundle
 contents:
-  - src: ./luci/telemt.lua
-    dst: /usr/lib/lua/luci/model/cbi/telemt.lua
-  # Если есть JSON для меню:
-  - src: ./luci/luci-app-telemt.json
-    dst: /usr/share/luci/menu.d/luci-app-telemt.json
+  - src: ./usr
+    dst: /usr
 scripts:
   postinstall: ./scripts/postinst
+  preremove: ./scripts/prerm
   postremove: ./scripts/postrm
+apk:
+  arch: "noarch"
+ipk:
+  arch: "all"

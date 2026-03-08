@@ -1,0 +1,11 @@
+{
+    "admin/services/telemt": {
+        "title": "Telemt MTProxy",
+        "order": 90,
+        "action": { "type": "cbi", "path": "telemt" },
+        "depends": {
+            "acl": [ "luci-app-telemt" ],
+            "uci": { "telemt": true }
+        }
+    }
+}

@@ -1,6 +1,6 @@
 -- ==============================================================================
 -- Telemt CBI Model (Configuration Binding Interface)
--- Version: 3.3.15 LTS (Monolithic CSR, Deep ME Tuning, Unified API)
+-- Version: 3.3.15 LTS (Monolithic CSR, Deep ME Tuning, Unified API, RAM Cache)
 -- ==============================================================================
 
 local sys = require "luci.sys"
@@ -9,6 +9,7 @@ local dsp = require "luci.dispatcher"
 local uci_cursor = require("luci.model.uci").cursor()
 
 -- Universal AJAX kill switch: suppresses 436 errors and prevents footer rendering
+-- Essential for returning raw text/JSON directly to the client-side JS engine.
 local function end_ajax()
     pcall(function() if dsp.context then dsp.context.dispatched = true end end)
     pcall(function() http.close() end)
@@ -22,16 +23,19 @@ local function read_file(path)
     local d = f:read("*all") or ""; f:close(); return d
 end
 
+-- OpenWrt 25+ Client-side rendering detection (for UI injections)
 local is_owrt25_lua = "false"
 local ow_rel = sys.exec("cat /etc/openwrt_release 2>/dev/null") or ""
 if ow_rel:match("DISTRIB_RELEASE='25") or ow_rel:match('DISTRIB_RELEASE="25') or ow_rel:match("SNAPSHOT") or ow_rel:match("%-rc") then is_owrt25_lua = "true" end
 
+-- Safely build the current URL for AJAX calls
 local _unpack = unpack or table.unpack
 local _ok_url, current_url = pcall(function() if dsp.context and dsp.context.request then return dsp.build_url(_unpack(dsp.context.request)) end return nil end)
 if not _ok_url or not current_url or current_url == "" then current_url = dsp.build_url("admin", "services", "telemt") end
 local safe_url = current_url:gsub('"', '\\"'):gsub('<', '&lt;'):gsub('>', '&gt;')
 
 local function tip(txt) return string.format([[<span class="telemt-tip" title="%s">(?)</span>]], txt:gsub('"', '&quot;')) end
+local is_ajax = (http.getenv("REQUEST_METHOD") == "POST" or http.formvalue("get_metrics") or http.formvalue("get_fw_status") or http.formvalue("get_scanners") or http.formvalue("get_log") or http.formvalue("get_wan_ip") or http.formvalue("get_qr"))
 
 -- ==============================================================================
 -- AJAX DISPATCHER (Zero-CORS Local Proxy)
@@ -109,6 +113,7 @@ if http.formvalue("get_metrics") == "1" then
         local fetch_cmd = (fetch_bin == "wget") and "wget -q --timeout=3 -O -" or "uclient-fetch -q --timeout=3 -O -"
         metrics = sys.exec(string.format("%s 'http://127.0.0.1:%d/metrics' 2>/dev/null", fetch_cmd, m_port) .. " | grep -E '^telemt_user|^telemt_uptime|^telemt_connections|^telemt_desync'") or ""
     end
+    -- Include accumulated offline stats
     local f = io.open("/tmp/telemt_stats.txt", "r")
     if f then metrics = metrics .. "\n# ACCUMULATED\n"; for line in f:lines() do local u, tx, rx = line:match("^(%S+) (%S+) (%S+)$"); if u then metrics = metrics .. string.format("telemt_accumulated_tx{user=\"%s\"} %s\ntelemt_accumulated_rx{user=\"%s\"} %s\n", u, tx, u, rx) end end; f:close() end
     http.prepare_content("text/plain")
@@ -199,14 +204,36 @@ local clean_csv = "username,secret,max_tcp_conns,max_unique_ips,data_quota,expir
 uci_cursor:foreach("telemt", "user", function(s) clean_csv = clean_csv .. string.format("%s,%s,%s,%s,%s,%s\n", s['.name'] or "", s.secret or "", s.max_tcp_conns or "", s.max_unique_ips or "", s.data_quota or "", s.expire_date or "") end)
 clean_csv = clean_csv:gsub("\n", "\\n"):gsub("\r", "")
 
--- 0% CPU Binary check
+-- ==============================================================================
+-- 0% CPU Binary check with RAM Cache Fallback
+-- ==============================================================================
 local bin_info = ""
 if not is_ajax then
     local bin_path = (sys.exec("command -v telemt 2>/dev/null") or ""):gsub("%s+", "")
-    if bin_path == "" then bin_info = "<span style='color:#d9534f; font-weight:bold; font-size:0.9em;'>Not installed (telemt binary not found)</span>"
-    else bin_info = string.format("<small style='opacity: 0.6;'>%s (v%s)</small>", bin_path, (sys.exec("tail -c 128 /usr/bin/telemt 2>/dev/null | grep -aoE 'MTProxy v[0-9.]+' | head -n 1"):gsub("%s+", "")) == "" and "unknown" or (sys.exec("tail -c 128 /usr/bin/telemt 2>/dev/null | grep -aoE 'MTProxy v[0-9.]+' | head -n 1"):gsub("%s+", ""))) end
+    if bin_path == "" then 
+        bin_info = "<span style='color:#d9534f; font-weight:bold; font-size:0.9em;'>Not installed (telemt binary not found)</span>"
+    else 
+        local ext_ver = ""
+        -- 1. Try to read cache created by init.d (instant, 0 CPU)
+        local f = io.open("/var/etc/telemt.version", "r")
+        if f then
+            ext_ver = f:read("*all"):gsub("%s+", "")
+            f:close()
+        end
+        
+        -- 2. Fallback to reading the binary tail if cache is absent (e.g. cold start)
+        if ext_ver == "" then
+            ext_ver = sys.exec("tail -c 128 /usr/bin/telemt 2>/dev/null | grep -a -i 'MTProxy v' | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -n 1"):gsub("%s+", "")
+        end
+        
+        if ext_ver == "" then ext_ver = "unknown" end
+        bin_info = string.format("<small style='opacity: 0.6;'>%s (v%s)</small>", bin_path, ext_ver) 
+    end
 end
 
+-- ==============================================================================
+-- CBI MAP INITIALIZATION
+-- ==============================================================================
 m = Map("telemt", "Telegram Proxy (MTProto)", [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.3.15 LTS</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.3.15+</span>]])
 m.on_commit = function(self) sys.call("logger -t telemt 'WebUI: Config saved. Dumping stats before procd reload...'; /etc/init.d/telemt run_save_stats 2>/dev/null") end
 
@@ -321,6 +348,10 @@ function up.validate(self, v) if v and v ~= "" and not v:match("^[A-Za-z0-9_]+$"
 
 local uw = s_up:option(Value, "weight", "Weight" .. tip("Routing priority weight. Default: 10.")); uw.datatype = "uinteger"; uw.default = "10"; uw.placeholder = "10"
 
+local usc = s_up:option(Value, "scopes", "Scopes" .. tip("Optional. Comma-separated scopes (e.g. 'premium,me'). Leave empty for all."))
+usc.placeholder = "premium,me"
+function usc.validate(self, v) if v and v ~= "" and not v:match("^[A-Za-z0-9_,]+$") then return nil, "Only Latin letters, numbers, underscores and commas allowed!" end return v end
+
 -- === TAB: ADVANCED ===
 local hnet = s:taboption("advanced", DummyValue, "_head_net"); hnet.rawhtml = true; hnet.default = "<h3>Network Listeners</h3>"
 s:taboption("advanced", Flag, "listen_ipv4", "Enable IPv4 Listener" .. tip("Listen for incoming IPv4 connections on 0.0.0.0")).default = "1"
@@ -333,8 +364,36 @@ local stun = s:taboption("advanced", Flag, "use_stun", "Enable STUN-probing" .. 
 s:taboption("advanced", Value, "me_pool_size", "ME Pool Size" .. tip("Desired number of concurrent ME writers in pool. Default: 16.")):depends("use_middle_proxy", "1")
 
 -- DEEP ME TUNING SPOILER
-local h_me_adv = s:taboption("advanced", DummyValue, "_head_me_adv"); h_me_adv.rawhtml = true
-h_me_adv.default = [[<div style="display:block; width:100%;"><details id="telemt_me_opts_details" style="display:block; width:100%; box-sizing:border-box; margin-top:15px; padding:10px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.3); border-radius:6px; cursor:pointer;"><summary style="font-weight:bold; font-size:1.05em; outline:none; cursor:pointer; color:#00a000;">Deep ME Tuning (Click to expand)</summary><p style="font-size:0.85em; opacity:0.8; margin-top:5px; margin-bottom:0;">Advanced Adaptive Pool and Recovery parameters. Edit only if you understand the runtime model.</p></details></div><script>setTimeout(function(){var d = document.getElementById('telemt_me_opts_details');if(!d) return;var tM = ['me_floor_mode', 'me_adaptive_floor_idle_secs', 'me_adaptive_floor_recover_grace_secs', 'me_adaptive_floor_min_writers_single_endpoint', 'me_warm_standby', 'me_single_endpoint_shadow_writers', 'me_single_endpoint_outage_mode_enabled', 'me_single_endpoint_outage_disable_quarantine', 'me_single_endpoint_shadow_rotate_every_secs', 'hardswap', 'me_drain_ttl', 'auto_degradation', 'degradation_min_dc'];tM.forEach(function(n){var el = document.querySelector('.cbi-value[data-name="' + n + '"]') || document.getElementById('cbi-telemt-general-' + n) || document.querySelector('[id$="-' + n + '"]');if(el) { el.style.paddingLeft = '15px'; d.appendChild(el); }});}, 300);</script>]]
+local h_me_adv = s:taboption("advanced", DummyValue, "_head_me_adv")
+h_me_adv.rawhtml = true
+h_me_adv.default = [[
+<div style="display:block; width:100%;">
+    <details id="telemt_me_opts_details" style="display:block; width:100%; box-sizing:border-box; margin-top:15px; padding:10px; background:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.3); border-radius:6px; cursor:pointer;">
+        <summary style="font-weight:bold; font-size:1.05em; outline:none; cursor:pointer; color:inherit;">Deep ME Tuning (Click to expand)</summary>
+        <p style="font-size:0.85em; opacity:0.8; margin-top:5px; margin-bottom:0;">Advanced Adaptive Pool and Recovery parameters. Edit only if you understand the runtime model.</p>
+    </details>
+</div>
+<script>
+function populateMESpoiler() {
+    var d = document.getElementById('telemt_me_opts_details');
+    if(!d) return;
+    var tM = ['me_floor_mode', 'me_adaptive_floor_idle_secs', 'me_adaptive_floor_recover_grace_secs', 'me_adaptive_floor_min_writers_single_endpoint', 'me_warm_standby', 'me_single_endpoint_shadow_writers', 'me_single_endpoint_outage_mode_enabled', 'me_single_endpoint_outage_disable_quarantine', 'me_single_endpoint_shadow_rotate_every_secs', 'hardswap', 'me_drain_ttl', 'auto_degradation', 'degradation_min_dc'];
+    var moved = 0;
+    tM.forEach(function(n){
+        var el = document.querySelector('.cbi-value[data-name="' + n + '"]') || document.getElementById('cbi-telemt-general-' + n) || document.querySelector('[id$="-' + n + '"]');
+        if(el && el.parentNode !== d) { 
+            el.style.paddingLeft = '15px'; 
+            d.appendChild(el); 
+            moved++;
+        }
+    });
+    // Retry if LuCI hasn't finished rendering the DOM elements yet
+    if (moved < tM.length) setTimeout(populateMESpoiler, 500);
+}
+setTimeout(populateMESpoiler, 300);
+</script>
+]]
+h_me_adv:depends("use_middle_proxy", "1")
 
 local fmode = s:taboption("advanced", ListValue, "me_floor_mode", "ME Floor Mode" .. tip("Static maintains fixed pool, Adaptive shrinks pool during idle.")); fmode:value("static", "Static (Fixed)"); fmode:value("adaptive", "Adaptive (Dynamic)"); fmode.default = "static"; fmode:depends("use_middle_proxy", "1")
 s:taboption("advanced", Value, "me_adaptive_floor_idle_secs", "Adaptive Idle (sec)" .. tip("Time without traffic before shrinking. Default: 600.")):depends("me_floor_mode", "adaptive")
@@ -369,7 +428,7 @@ s:taboption("advanced", Value, "tm_ack", "ACK" .. tip("Client ACK timeout in sec
 s:taboption("advanced", Value, "replay_window_secs", "Replay Window (sec)" .. tip("Time window for replay attack protection. Default: 1800.")).default = "1800"
 
 local hmet = s:taboption("advanced", DummyValue, "_head_met"); hmet.rawhtml = true; hmet.default = "<h3 style='margin-top:20px;'>Metrics & Control API</h3>"
-s:taboption("advanced", Flag, "extended_runtime_enabled", "Enable Extended Runtime Dashboard" .. tip("Unified switch: Enables REST API and Minimal Runtime for rich diagnostics.")).default = "1"
+s:taboption("advanced", Flag, "extended_runtime_enabled", "Enable Control API & Extended Runtime" .. tip("Unified switch. Required for detailed UI diagnostics, Live Traffic stats, and the autonomous Telegram Bot.")).default = "1"
 local mport = s:taboption("advanced", Value, "metrics_port", "Prometheus Port" .. tip("Port for internal Prometheus exporter. Default: 9092.")); mport.datatype = "port"; mport.default = "9092"
 local aport = s:taboption("advanced", Value, "api_port", "Control API Port" .. tip("Port for the REST API (v1). Default: 9091.")); aport.datatype = "port"; aport.default = "9091"
 s:taboption("advanced", Flag, "metrics_allow_lo", "Allow Localhost" .. tip("Auto-allow 127.0.0.1 and ::1. Required for Live Traffic stats.")).default = "1"

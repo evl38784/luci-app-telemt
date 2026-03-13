@@ -71,8 +71,8 @@ end
 if is_post and http.formvalue("telemt_action") then
     local act = http.formvalue("telemt_action")
     if act == "start" then sys.call("logger -t telemt 'WebUI: Manual START'; /etc/init.d/telemt start >/dev/null 2>&1 &")
-    elseif act == "stop" then sys.call("logger -t telemt 'WebUI: Manual STOP'; /etc/init.d/telemt stop >/dev/null 2>&1 &")
-    elseif act == "restart" then sys.call("logger -t telemt 'WebUI: Manual RESTART'; /etc/init.d/telemt restart >/dev/null 2>&1 &")
+    elseif act == "stop" then sys.call("logger -t telemt 'WebUI: Manual STOP'; /etc/init.d/telemt stop >/dev/null 2>&1; sleep 1; for p in $(pidof telemt); do kill -9 $p 2>/dev/null; done &")
+    elseif act == "restart" then sys.call("logger -t telemt 'WebUI: Manual RESTART'; /etc/init.d/telemt run_save_stats >/dev/null 2>&1; /etc/init.d/telemt stop >/dev/null 2>&1; sleep 1; for p in $(pidof telemt); do kill -9 $p 2>/dev/null; done; /etc/init.d/telemt start >/dev/null 2>&1 &")
     elseif act == "reset_stats" then sys.call("logger -t telemt 'WebUI: Reset Stats'; rm -f /tmp/telemt_stats.txt")
     end
     http.prepare_content("text/plain"); pcall(function() http.write("ok") end); end_ajax(); return
@@ -167,11 +167,15 @@ if http.formvalue("get_metrics") == "1" then
         local prom_str = http_get_local("http://127.0.0.1:" .. m_port .. "/metrics", 2)
         -- STARTING STATE FIX: Ensure UI knows daemon is alive but booting
         if prom_str == "" then metrics = metrics .. "# telemt_state=starting\n" else metrics = metrics .. prom_str end
+        
+        if ext_rt == "1" then
+            metrics = metrics .. "\n---TELEMT_API_JSON---\n"
+            local api_json = http_get_local("http://127.0.0.1:" .. api_port .. "/v1/stats/minimal/all", 2)
+            metrics = metrics .. ((api_json ~= "" and api_json) or "{}")
+        end
     end
     
     -- READ RACE CONDITION FIX: Atomic copy before parsing accumulated stats
-    -- CRITICAL ORDER FIX: ACCUMULATED must come BEFORE ---TELEMT_API_JSON--- separator
-    -- so that JSON.parse(parts[1]) in JS gets clean JSON without extra lines appended.
     sys.call("cp -f /tmp/telemt_stats.txt /tmp/telemt_stats_read.tmp 2>/dev/null")
     local f = io.open("/tmp/telemt_stats_read.tmp", "r")
     if f then
@@ -181,18 +185,6 @@ if http.formvalue("get_metrics") == "1" then
             if u then metrics = metrics .. string.format("telemt_accumulated_tx{user=\"%s\"} %s\ntelemt_accumulated_rx{user=\"%s\"} %s\n", u, tx, u, rx) end
         end
         f:close()
-    end
-    
-    -- API JSON MUST be last: JS does split('---TELEMT_API_JSON---') and JSON.parse(parts[1])
-    -- Any text after the JSON breaks parse. Keep this block at the very end of the response.
-    if pid ~= "" then
-        local ext_rt = uci_cursor:get("telemt", "general", "extended_runtime_enabled") or "1"
-        local api_port = tonumber(uci_cursor:get("telemt", "general", "api_port")) or 9091
-        if ext_rt == "1" then
-            metrics = metrics .. "\n---TELEMT_API_JSON---\n"
-            local api_json = http_get_local("http://127.0.0.1:" .. api_port .. "/v1/stats/minimal/all", 2)
-            metrics = metrics .. ((api_json ~= "" and api_json) or "{}")
-        end
     end
     
     http.prepare_content("text/plain"); pcall(function() http.write(metrics) end); end_ajax(); return
@@ -210,10 +202,11 @@ end
 
 if http.formvalue("get_log") == "1" then
     http.prepare_content("text/plain")
-    -- LOGREAD FIX: Certain OpenWrt versions lack egrep and logread -e, fallback to grep
-    local log_data = sys.exec("logread 2>/dev/null | grep -ia 'telemt' | tail -n 100")
+    local cmd = "logread -e 'telemt' | tail -n 100 2>/dev/null"
+    if has_cmd("timeout") then cmd = "timeout 2 " .. cmd end
+    local log_data = sys.exec(cmd)
     if not log_data or log_data:gsub("%s+", "") == "" then log_data = "No logs found." end
-    pcall(function() http.write(log_data:gsub("\27%[[%d;]*%a", "")) end); end_ajax(); return
+    pcall(function() http.write(log_data) end); end_ajax(); return
 end
 
 if http.formvalue("get_wan_ip") == "1" then
@@ -324,6 +317,18 @@ function postAction(action) {
         if(typeof updateFWStatus !== 'undefined') updateFWStatus();
     }).catch(function(err){ console.error("Action error:", err); });
 }
+setTimeout(function(){
+    ['start', 'stop', 'restart'].forEach(function(act) {
+        var btn = document.getElementById('btn_telemt_' + act);
+        if(btn && !btn.dataset.bound) {
+            btn.dataset.bound = "1";
+            btn.addEventListener('click', function(e){
+                e.preventDefault(); e.stopPropagation();
+                logAction('Manual ' + act); postAction(act);
+            });
+        }
+    });
+}, 500);
 </script>]], current_url)
 
 local st_html = string.format([[
@@ -365,12 +370,6 @@ local myip = s:taboption("general", Value, "external_ip", "External IP / DynDNS"
 myip.datatype = "string"; myip.default = saved_ip; myip.validate = validate_ip_domain
 
 local p = s:taboption("general", Value, "port", "MTProxy Port" .. tip("The port on which the MTProxy server will listen for connections.")); p.datatype = "port"; p.rmempty = false; p.default = "8443"
-
--- PATCH 3.3.16: External port for tg:// links — critical under NAT with port-mapping
--- Example: router listens on :8443 internally, ISP maps it to :443 externally.
-local pp = s:taboption("general", Value, "public_port",
-    "External Port (for links)" .. tip("Port shown in tg://proxy links. Leave empty = same as Proxy Port. Set when behind NAT with port-mapping (e.g. router :8443 \226\134\146 ISP :443)."))
-pp.datatype = "port"; pp.placeholder = "same as Proxy Port"; pp.rmempty = true
 
 local afw = s:taboption("general", Flag, "auto_fw", "Auto-open Port (Magic)" .. tip("Uses procd API to open port in RAM. Rule will not appear in Firewall menu. Closes automatically if proxy stops."))
 afw.default = "0"; afw.description = "<div style='margin-top:5px; padding:8px; background:rgba(128,128,128,0.1); border-left:3px solid #00a000; font-size:0.9em;'><b>Current Status:</b> <span id='fw_status_span' style='color:#888; font-style:italic;'>Checking...</span></div>"
@@ -427,18 +426,20 @@ local mp = s:taboption("advanced", Flag, "use_middle_proxy", "Use ME Proxy" .. t
 local stun = s:taboption("advanced", Flag, "use_stun", "Enable STUN-probing" .. tip("Leave enabled if your server is behind NAT. Required for ME proxy on standard setups.")); stun:depends("use_middle_proxy", "1"); stun.default = "0"
 local meps = s:taboption("advanced", Value, "me_pool_size", "ME Pool Size" .. tip("Desired number of concurrent ME writers in pool. Default: 16.")); meps.datatype = "uinteger"; meps:depends("use_middle_proxy", "1")
 
--- PATCH 3.3.16: Removed h_me_adv spoiler wrapper.
--- The <details> container was hiding a mix of real and phantom fields.
--- Real fields now appear directly via :depends() — no spoiler needed.
+local h_me_adv = s:taboption("advanced", DummyValue, "_head_me_adv")
+h_me_adv.rawhtml = true
+h_me_adv.default = [[<div style="display:block; width:100%;"><details id="telemt_me_opts_details" style="display:block; width:100%; box-sizing:border-box; margin-top:15px; padding:10px; background:rgba(128,128,128,0.05); border:1px solid rgba(128,128,128,0.3); border-radius:6px; cursor:pointer;"><summary style="font-weight:bold; font-size:1.05em; outline:none; cursor:pointer; color:inherit;">Deep ME Tuning (Click to expand)</summary><p style="font-size:0.85em; opacity:0.8; margin-top:5px; margin-bottom:0;">Advanced Adaptive Pool and Recovery parameters. Edit only if you understand the runtime model.</p></details></div>]]
+h_me_adv:depends("use_middle_proxy", "1")
 
--- PATCH 3.3.16: Removed 8 phantom taboption fields. These were silently ignored
--- by the Rust TOML parser — binary v3.3.16+ self-tunes them as read-only state:
---   me_floor_mode, me_adaptive_floor_idle_secs, me_adaptive_floor_recover_grace_secs,
---   me_adaptive_floor_min_writers_single_endpoint, me_single_endpoint_shadow_writers,
---   me_single_endpoint_outage_mode_enabled, me_single_endpoint_outage_disable_quarantine,
---   me_single_endpoint_shadow_rotate_every_secs
--- Real ME controls below (all kept):
-local mwsb = s:taboption("advanced", Value, "me_warm_standby", "ME Warm Standby" .. tip("Pre-initialized connections kept idle as reserve. Default: 8.")); mwsb.datatype = "uinteger"; mwsb:depends("use_middle_proxy", "1")
+local fmode = s:taboption("advanced", ListValue, "me_floor_mode", "ME Floor Mode" .. tip("Static maintains fixed pool, Adaptive shrinks pool during idle.")); fmode:value("static", "Static (Fixed)"); fmode:value("adaptive", "Adaptive (Dynamic)"); fmode.default = "static"; fmode:depends("use_middle_proxy", "1")
+local maid = s:taboption("advanced", Value, "me_adaptive_floor_idle_secs", "Adaptive Idle (sec)" .. tip("Time without traffic before shrinking. Default: 600.")); maid.datatype = "uinteger"; maid:depends({use_middle_proxy="1", me_floor_mode="adaptive"})
+local magr = s:taboption("advanced", Value, "me_adaptive_floor_recover_grace_secs", "Adaptive Grace (sec)" .. tip("Grace period preventing pool flapping. Default: 120.")); magr.datatype = "uinteger"; magr:depends({use_middle_proxy="1", me_floor_mode="adaptive"})
+local mamw = s:taboption("advanced", Value, "me_adaptive_floor_min_writers_single_endpoint", "Adaptive Min Writers" .. tip("Minimum writers to keep alive during deep idle. Default: 1.")); mamw.datatype = "uinteger"; mamw:depends({use_middle_proxy="1", me_floor_mode="adaptive"})
+local mwsb = s:taboption("advanced", Value, "me_warm_standby", "ME Warm Standby" .. tip("Pre-initialized connections kept idle. Default: 8.")); mwsb.datatype = "uinteger"; mwsb:depends("use_middle_proxy", "1")
+local mse_sw = s:taboption("advanced", Value, "me_single_endpoint_shadow_writers", "Shadow Writers" .. tip("Hidden backup connections for fragile DCs. Default: 2.")); mse_sw.datatype = "uinteger"; mse_sw:depends("use_middle_proxy", "1")
+local outm = s:taboption("advanced", Flag, "me_single_endpoint_outage_mode_enabled", "Outage Recovery Mode" .. tip("Aggressive reconnect loop if all writers die.")); outm.default = "1"; outm:depends("use_middle_proxy", "1")
+s:taboption("advanced", Flag, "me_single_endpoint_outage_disable_quarantine", "Bypass Quarantine" .. tip("Ignore reconnect delays during an outage to restore fast.")):depends({use_middle_proxy="1", me_single_endpoint_outage_mode_enabled="1"})
+local mse_sr = s:taboption("advanced", Value, "me_single_endpoint_shadow_rotate_every_secs", "Shadow Rotate (sec)" .. tip("Period to refresh idle shadow writers. Default: 900.")); mse_sr.datatype = "uinteger"; mse_sr:depends("use_middle_proxy", "1")
 s:taboption("advanced", Flag, "hardswap", "ME Pool Hardswap" .. tip("Enable C-like hard-swap for ME pool generations.")):depends("use_middle_proxy", "1")
 local mdt = s:taboption("advanced", Value, "me_drain_ttl", "ME Drain TTL (sec)" .. tip("Drain-TTL in seconds for stale ME writers. Default: 90.")); mdt.datatype = "uinteger"; mdt:depends("use_middle_proxy", "1")
 local adeg = s:taboption("advanced", Flag, "auto_degradation", "Auto-Degradation (Fallback)" .. tip("Enable auto-degradation from ME to Direct-DC if ME fails. Default: enabled.")); adeg.default = "1"; adeg:depends("use_middle_proxy", "1")
@@ -670,9 +671,7 @@ var repackTimer = null;
 function repackAllSpoilers() {
     isRepacking = true;
     var spoilerMaps = {
-        // PATCH 3.3.16: telemt_me_opts_details spoiler removed — fields now visible directly.
-        // Kept in map only: real fields that still exist. Phantom fields removed from map.
-        // (empty entry retained so spoilerMaps structure is valid)
+        'telemt_me_opts_details': ['me_floor_mode', 'me_adaptive_floor_idle_secs', 'me_adaptive_floor_recover_grace_secs', 'me_adaptive_floor_min_writers_single_endpoint', 'me_warm_standby', 'me_single_endpoint_shadow_writers', 'me_single_endpoint_outage_mode_enabled', 'me_single_endpoint_outage_disable_quarantine', 'me_single_endpoint_shadow_rotate_every_secs', 'hardswap', 'me_drain_ttl', 'auto_degradation', 'degradation_min_dc'],
         'telemt_adv_opts_details': ['desync_all_full', 'mask_proxy_protocol', 'announce_ip', 'ad_tag', 'fake_cert_len', 'tls_full_cert_ttl_secs', 'ignore_time_skew'],
         'telemt_timeouts_details': ['tm_handshake', 'tm_connect', 'tm_keepalive', 'tm_ack', 'replay_window_secs']
     };
@@ -695,8 +694,7 @@ function scheduleRepack() {
 }
 
 document.addEventListener('change', function(e) {
-    // PATCH 3.3.16: removed me_floor_mode from trigger (field deleted)
-    if (e.target && (e.target.name && (e.target.name.indexOf('use_middle_proxy') > -1 || e.target.name.indexOf('auto_degradation') > -1))) {
+    if (e.target && (e.target.name && (e.target.name.indexOf('use_middle_proxy') > -1 || e.target.name.indexOf('me_floor_mode') > -1 || e.target.name.indexOf('auto_degradation') > -1))) {
         scheduleRepack();
     }
 });
@@ -718,8 +716,7 @@ function updateCascadesState() {
 function setOfflineState() {
     var sEl = document.getElementById('dash_status'); if(sEl) { sEl.innerText = 'STOPPED'; sEl.style.color = '#d9534f'; }
     var rEl = document.getElementById('dash_rss'); if(rEl) { rEl.innerText = '0 MB'; rEl.style.color = '#888'; }
-    // UX FIX: We no longer forcefully overwrite user badges with [ Offline ] here,
-    // so they can show accumulated stats while the proxy is stopped.
+    document.querySelectorAll('.user-flat-stat').forEach(function(el) { el.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>[ Offline ]</span>"; });
     
     var sumEl = document.getElementById('telemt_users_summary_inner');
     if (sumEl) sumEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>Status: Daemon Stopped</span>";
@@ -777,7 +774,7 @@ function renderHealthGrid(apiData, promText) {
     var promUpActive = upActiveMatch ? upActiveMatch[1] : '0';
     var promUpFails = upFailsMatch ? upFailsMatch[1] : '0';
 
-    var promBadges = '<span class="badge badge-err" title="Number of detected Deep Packet Inspection probes">DPI Probes: ' + probes + '</span><span class="badge badge-err" title="Connections rejected or actively scanned">Rejected/Scans: ' + scans + '</span>';
+    var promBadges = '<span class="badge badge-err">DPI Probes: ' + probes + '</span><span class="badge badge-err">Rejected/Scans: ' + scans + '</span>';
 
     var parsed = parseApiResponse(apiData);
     var rt = parsed.runtime;
@@ -787,8 +784,8 @@ function renderHealthGrid(apiData, promText) {
     if (!apiOk || !rt) {
         var hasAnyProm = promText.indexOf('telemt_') > -1;
         var apiMsg = hasAnyProm 
-            ? '<span class="badge badge-gray" title="Control API is disabled or not responding. Basic stats are still shown from Prometheus.">Control API: Disabled</span>'
-            : '<span class="badge badge-err" title="telemt daemon is not returning any metrics!">Daemon: No Metrics</span>';
+            ? '<span class="badge badge-err">Control API: Offline</span><span style="font-size:0.85em; color:#888; display:block; margin-top:5px;">API port не отвечает. Проверьте api_port и extended_runtime_enabled.</span>'
+            : '<span class="badge badge-err">Daemon: No Metrics</span>';
         
         if(dg) dg.innerHTML = apiMsg + promBadges;
         if(dUp) dUp.innerHTML = '<div style="color:#888; padding:10px;"><b>Detailed tables require Control API.</b><br><br><b>Active Connects:</b> ' + promUpActive + ' | <b>Fails:</b> ' + promUpFails + '</div>';
@@ -797,19 +794,12 @@ function renderHealthGrid(apiData, promText) {
     }
     
     var mode = rt.route_mode || "direct";
-    var meRdy = rt.me_runtime_ready ? '<span class="badge badge-ok" title="Middle-End Proxy is actively communicating with Telegram DCs">ME: Ready</span>' : '<span class="badge badge-gray" title="Middle-End Proxy is not enabled in backend">ME: Disabled</span>';
-    var _meWr = (st && st.me_writers && Array.isArray(st.me_writers.writers)) ? st.me_writers.writers : [];
-    var _hasDegraded = _meWr.some(function(w){ return w && w.degraded; });
-    var fb = _hasDegraded ? '<span class="badge badge-err" title="ME endpoints failed, traffic is falling back to Direct DC connections!">Fallback: ON</span>' : '<span class="badge badge-ok" title="Routing normally without degradation">Fallback: OFF</span>';
-    var rroute = rt.reroute_active ? '<span class="badge badge-err" title="Traffic is being rerouted due to failures!">Reroute: ON</span>' : '<span class="badge badge-ok" title="No active reroutes">Reroute: OFF</span>';
-    var acc = rt.accepting_new_connections ? '<span class="badge badge-ok" title="Proxy is accepting client connections">Accepting</span>' : '<span class="badge badge-err" title="Proxy is rejecting new connections">Rejecting</span>';
+    var meRdy = rt.me_runtime_ready ? '<span class="badge badge-ok">ME: Ready</span>' : '<span class="badge badge-gray">ME: Disabled</span>';
+    var fb = rt.me2dc_fallback_enabled ? '<span class="badge badge-err">Fallback: ON</span>' : '<span class="badge badge-ok">Fallback: OFF</span>';
+    var rroute = rt.reroute_active ? '<span class="badge badge-err">Reroute: ON</span>' : '<span class="badge badge-ok">Reroute: OFF</span>';
+    var acc = rt.accepting_new_connections ? '<span class="badge badge-ok">Accepting</span>' : '<span class="badge badge-err">Rejecting</span>';
     
-    var dcsCount = 0;
-    if (st && st.dcs && typeof st.dcs === 'object' && Array.isArray(st.dcs.dcs)) { dcsCount = st.dcs.dcs.length; } 
-    else if (st && Array.isArray(st.dcs)) { dcsCount = st.dcs.length; }
-    var dcsBadge = '<span class="badge badge-ok" title="Number of Telegram Datacenters currently visible to the backend">DCs: ' + dcsCount + '</span>';
-    
-    if(dg) dg.innerHTML = '<span class="badge ' + (mode==='middle'?'badge-ok':'badge-gray') + '" title="Current routing mode. Direct = direct connection to Telegram.">Mode: ' + escHTML(mode) + '</span>' + meRdy + fb + rroute + dcsBadge + acc + promBadges;
+    if(dg) dg.innerHTML = '<span class="badge ' + (mode==='middle'?'badge-ok':'badge-gray') + '">Mode: ' + escHTML(mode) + '</span>' + meRdy + fb + rroute + acc + promBadges;
     
     if (dUp) {
         if (st && st.upstreams && Array.isArray(st.upstreams) && st.upstreams.length > 0) {
@@ -844,7 +834,7 @@ function renderHealthGrid(apiData, promText) {
                 var dc = dcs[k] || {};
                 var coverage = Number(dc.coverage_pct || 0);
                 var covCol = coverage >= 100 ? '<span style="color:#00a000">' + coverage + '%</span>' : '<span style="color:#d9534f">' + coverage + '%</span>';
-                dHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1">DC ' + escHTML(String(dc.dc || '-')) + '</div><div style="flex:0 0 100px; text-align:right;">' + (dc.alive_writers || 0) + ' / ' + (dc.required_writers || 0) + '</div><div style="flex:0 0 70px; text-align:right;">' + covCol + '</div><div style="flex:0 0 60px; text-align:right;">' + (dc.rtt_ms || dc.rtt_ema_ms || 0) + 'ms</div></div>';
+                dHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1">DC ' + escHTML(String(dc.dc || '-')) + '</div><div style="flex:0 0 100px; text-align:right;">' + (dc.alive_writers || 0) + ' / ' + (dc.required_writers || 0) + '</div><div style="flex:0 0 70px; text-align:right;">' + covCol + '</div><div style="flex:0 0 60px; text-align:right;">' + (dc.rtt_ema_ms || 0) + 'ms</div></div>';
             }
             dDc.innerHTML = dHtml;
         } else if (rt && rt.me_runtime_ready) {
@@ -950,13 +940,11 @@ function fetchMetrics() {
             if (isExpired) { statEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>[ EXPIRED ]</span>"; return; }
             if (isOverQuota) { statEl.innerHTML = "<span style='color:#d9534f; font-weight:bold;'>[ QUOTA ]</span>"; return; }
             if (isEn === "0" || (cb && !cb.checked)) { statEl.innerHTML = "<span style='color:#888; font-weight:bold;'>[ PAUSED ]</span>"; return; }
-            // removed the aggressive string overwriting on isOffline so we can show dim stats
+            if (isOffline) { statEl.innerHTML = "<span style='color:#888;'>Offline (DL: " + formatMB(finalTx) + ")</span>"; return; }
             
             var c_col = stat.conns > 0 ? "#00a000" : "#888"; 
             var dotUser = "<svg width='10' height='10' style='vertical-align:middle;'><circle cx='5' cy='5' r='5' fill='" + c_col + "'/></svg>";
-            var statHtml = "<div style='display:flex; align-items:center; gap:4px; margin-bottom:2px; flex-wrap:wrap;'><span style='color:#00a000;' title='Total Download (Live + Accumulated)'>&darr; " + formatMB(finalTx) + "</span> <span class='stat-divider'>/</span> <span style='color:#d35400;' title='Total Upload (Live + Accumulated)'>&uarr; " + formatMB(finalRx) + "</span> <span class='stat-divider'>|</span> <span style='color:" + c_col + ";' title='Active TCP Connections'>" + dotUser + "&nbsp;" + stat.conns + "&nbsp;<small>conns</small></span></div>";
-            if (isOffline) { statEl.innerHTML = "<div style='opacity: 0.6; filter: grayscale(1);' title='Daemon is offline, but showing accumulated stats'>" + statHtml + "</div>"; } 
-            else { statEl.innerHTML = statHtml; }
+            statEl.innerHTML = "<div style='display:flex; align-items:center; gap:4px; margin-bottom:2px; flex-wrap:wrap;'><span style='color:#00a000;'>&darr; " + formatMB(finalTx) + "</span> <span class='stat-divider'>/</span> <span style='color:#d35400;'>&uarr; " + formatMB(finalRx) + "</span> <span class='stat-divider'>|</span> <span style='color:" + c_col + ";'>" + dotUser + "&nbsp;" + stat.conns + "&nbsp;<small>conns</small></span></div>";
         });
         
         var now = Date.now(); var speedDL = 0, speedUL = 0; 
@@ -996,9 +984,6 @@ function getEffectiveIP() { var m1 = document.querySelector('input[name*="cbid.t
 function updateLinks() {
     var d = document.querySelector('input[name*="domain"]'); var p = document.querySelector('input[name*="port"]'); var modeSelect = document.querySelector('select[name*="mode"]'); var fmtSelect = document.querySelector('select[name*="_link_fmt"]');
     var ip = getEffectiveIP(); var port = p ? p.value.trim() : "8443"; var domain = d ? d.value.trim() : ""; var mode = modeSelect ? modeSelect.value : "tls";
-    // PATCH 3.3.16: public_port overrides port in tg:// links (critical for NAT port-mapping)
-    var ppField = document.querySelector('input[name*="cbid.telemt.general.public_port"]');
-    if (ppField && ppField.value.trim() !== "") { port = ppField.value.trim(); }
     var effectiveFmt = mode; if (mode === 'all' && fmtSelect) effectiveFmt = fmtSelect.value;
     if(!ip || !port) return;
     var hd = ""; if (domain && (effectiveFmt === 'tls' || effectiveFmt === 'all')) { for(var n=0; n<domain.length; n++) { var hex = domain.charCodeAt(n).toString(16); if (hex.length < 2) hex = "0" + hex; hd += hex; } }
@@ -1076,13 +1061,14 @@ function copyLogContent(btn) {
 function updateFWStatus() { if (!document.getElementById('cbi-telemt-general')) return; var fwSpan = document.getElementById('fw_status_span'); if (!fwSpan) return; fetch(lu_current_url.split('#')[0] + (lu_current_url.indexOf('?') > -1 ? '&' : '?') + 'get_fw_status=1&_t=' + Date.now()).then(r => r.text()).then(txt => { txt = cleanResponse(txt); if(txt.indexOf('OPEN') > -1 || txt.indexOf('CLOSED') > -1 || txt.indexOf('STOPPED') > -1) fwSpan.innerHTML = txt; }).catch(()=>{}); }
 
 function closeModals() { document.querySelectorAll('.qr-modal-overlay').forEach(function(m) { m.classList.remove('active'); }); document.body.classList.remove('qr-modal-open'); }
-function showQRModal(link) { if (!link || link.indexOf('Error') === 0) return; var overlay = document.getElementById('qr-modal-overlay'); if (!overlay) { overlay = document.createElement('div'); overlay.id = 'qr-modal-overlay'; overlay.className = 'qr-modal-overlay'; var content = document.createElement('div'); content.className = 'custom-modal-content'; var body = document.createElement('div'); body.id = 'qr-modal-body'; content.appendChild(body); var clsBtn = document.createElement('button'); clsBtn.className = 'cbi-button cbi-button-reset'; clsBtn.style.cssText = 'margin-top:15px; width:100%;'; clsBtn.innerText = 'Close'; clsBtn.addEventListener('click', closeModals); content.appendChild(clsBtn); overlay.appendChild(content); document.body.appendChild(overlay); overlay.addEventListener('click', function(e) { if (e.target === overlay) closeModals(); }); } var body = document.getElementById('qr-modal-body'); body.innerHTML = 'Generating...'; overlay.classList.add('active'); document.body.classList.add('qr-modal-open'); fetch(lu_current_url.split('#')[0] + (lu_current_url.indexOf('?') > -1 ? '&' : '?') + 'get_qr=1&link=' + encodeURIComponent(link) + '&_t=' + Date.now()).then(r => r.text()).then(txt => { txt = cleanResponse(txt); if (txt.indexOf('error: qrencode_missing') > -1) body.innerHTML = '<div style="color:#d9534f; font-weight:bold; margin-bottom:10px;">Install qrencode</div>'; else if (txt.indexOf('error: invalid_link') > -1) body.innerHTML = '<div style="color:#d9534f; font-weight:bold;">Invalid Link Format</div>'; else { var svgMatch = txt.match(/<svg[\s\S]*?<\/svg>/i); body.innerHTML = svgMatch ? svgMatch[0] : 'Error'; } }).catch(() => { body.innerHTML = 'Connection error.'; }); }
+function showQRModal(link) { if (!link || link.indexOf('Error') === 0) return; var overlay = document.getElementById('qr-modal'); if (!overlay) { overlay = document.createElement('div'); overlay.id = 'qr-modal'; overlay.className = 'qr-modal-overlay'; var content = document.createElement('div'); content.className = 'custom-modal-content'; var body = document.createElement('div'); body.id = 'qr-modal-body'; content.appendChild(body); var clsBtn = document.createElement('button'); clsBtn.className = 'cbi-button cbi-button-reset'; clsBtn.style.cssText = 'margin-top:15px; width:100%;'; clsBtn.innerText = 'Close'; clsBtn.addEventListener('click', closeModals); content.appendChild(clsBtn); overlay.appendChild(content); document.body.appendChild(overlay); overlay.addEventListener('click', function(e) { if (e.target === overlay) closeModals(); }); } var body = document.getElementById('qr-modal-body'); body.innerHTML = 'Generating...'; overlay.classList.add('active'); document.body.classList.add('qr-modal-open'); fetch(lu_current_url.split('#')[0] + (lu_current_url.indexOf('?') > -1 ? '&' : '?') + 'get_qr=1&link=' + encodeURIComponent(link) + '&_t=' + Date.now()).then(r => r.text()).then(txt => { txt = cleanResponse(txt); if (txt.indexOf('error: qrencode_missing') > -1) body.innerHTML = '<div style="color:#d9534f; font-weight:bold; margin-bottom:10px;">Install qrencode</div>'; else if (txt.indexOf('error: invalid_link') > -1) body.innerHTML = '<div style="color:#d9534f; font-weight:bold;">Invalid Link Format</div>'; else { var svgMatch = txt.match(/<svg[\s\S]*?<\/svg>/i); body.innerHTML = svgMatch ? svgMatch[0] : 'Error'; } }).catch(() => { body.innerHTML = 'Connection error.'; }); }
 
-function doExportCSV() { fetch(lu_current_url.split('#')[0], { method: 'POST', body: (function(){var f=new FormData(); f.append('log_ui_event', '1'); f.append('msg', 'Exporting Users to CSV'); return f;})() }); var blob = new Blob(["]] .. clean_csv .. [["], { type: 'text/csv;charset=utf-8;' }); var link = document.createElement("a"); link.setAttribute("href", URL.createObjectURL(blob)); link.setAttribute("download", "telemt_users.csv"); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
+function doExportStats() { if (!window._telemtLastStats) { alert("Live stats not loaded yet. Wait a few seconds."); return; } logAction("Exporting Live Stats to CSV"); var csv = "username,total_dl_bytes,total_ul_bytes,active_connections\n"; var grandTx = 0, grandRx = 0, grandConns = 0; for (var u in window._telemtLastStats) { if (window._telemtLastStats.hasOwnProperty(u)) { var s = window._telemtLastStats[u]; var tx = (s.live_tx || 0) + (s.acc_tx || 0); var rx = (s.live_rx || 0) + (s.acc_rx || 0); var c = (s.conns || 0); csv += u + "," + tx + "," + rx + "," + c + "\n"; grandTx += tx; grandRx += rx; grandConns += c; } } csv += "TOTAL_ALL_USERS," + grandTx + "," + grandRx + "," + grandConns + "\n"; var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); var link = document.createElement("a"); link.setAttribute("href", URL.createObjectURL(blob)); link.setAttribute("download", "telemt_traffic_stats.csv"); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
+function doExportCSV() { logAction("Exporting Users to CSV"); var blob = new Blob(["]] .. clean_csv .. [["], { type: 'text/csv;charset=utf-8;' }); var link = document.createElement("a"); link.setAttribute("href", URL.createObjectURL(blob)); link.setAttribute("download", "telemt_users.csv"); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
 function readCSVFile(input) { var file = input.files[0]; var displaySpan = document.getElementById('csv_file_name_display'); if (!file) { displaySpan.innerText = "No file selected"; return; } displaySpan.innerText = file.name; var reader = new FileReader(); reader.onload = function(e) { document.getElementById('csv_text_area').value = e.target.result; }; reader.readAsText(file); }
 
 function submitImport() { 
-    fetch(lu_current_url.split('#')[0], { method: 'POST', body: (function(){var f=new FormData(); f.append('log_ui_event', '1'); f.append('msg', 'Executing Users Import'); return f;})() }); var csv = document.getElementById('csv_text_area').value; var radioBtn = document.querySelector('input[name="import_mode"]:checked'); var mode = radioBtn ? radioBtn.value : 'replace';
+    logAction('Executing Users Import'); var csv = document.getElementById('csv_text_area').value; var radioBtn = document.querySelector('input[name="import_mode"]:checked'); var mode = radioBtn ? radioBtn.value : 'replace';
     var form = document.createElement('form'); form.method = 'POST'; form.action = lu_current_url.split('#')[0]; var inputs = { 'import_users': '1', 'csv_data': csv, 'import_mode': mode };
     for (var key in inputs) { var el = document.createElement(key === 'csv_data' ? 'textarea' : 'input'); if (key !== 'csv_data') el.type = 'hidden'; el.name = key; el.value = inputs[key]; form.appendChild(el); }
     var tokenVal = null; var tokenNode = document.querySelector('input[name="token"]');
@@ -1120,8 +1106,9 @@ function fixTabIsolation() {
             var sumInner = document.createElement('div'); sumInner.id = 'telemt_users_summary_inner'; sumInner.className = 'telemt-dash-summary'; topRow.appendChild(sumInner);
             var btnsTop = document.createElement('div'); btnsTop.className = 'telemt-dash-btns';
             var btnResetStats = document.createElement('input'); btnResetStats.type = 'button'; btnResetStats.className = 'cbi-button cbi-button-remove'; btnResetStats.value = 'Reset Stats'; btnResetStats.title = 'Clear all accumulated user traffic statistics'; btnResetStats.addEventListener('click', function(){ if(confirm('Are you sure you want to completely clear ALL accumulated user traffic statistics?')) { postAction('reset_stats'); } }); btnsTop.appendChild(btnResetStats);
-            var btnExpCsv = document.createElement('input'); btnExpCsv.type = 'button'; btnExpCsv.className = 'cbi-button cbi-button-action'; btnExpCsv.value = 'Export Stats'; btnExpCsv.addEventListener('click', doExportCSV); btnsTop.appendChild(btnExpCsv);
-            var btnImpCsv = document.createElement('input'); btnImpCsv.type = 'button'; btnImpCsv.className = 'cbi-button cbi-button-apply'; btnImpCsv.value = 'Import (CSV)'; btnImpCsv.addEventListener('click', showImportModal); btnsTop.appendChild(btnImpCsv);
+            var btnExpStat = document.createElement('input'); btnExpStat.type = 'button'; btnExpStat.className = 'cbi-button cbi-button-apply'; btnExpStat.value = 'Export Stats'; btnExpStat.title = 'Export traffic usage statistics'; btnExpStat.addEventListener('click', doExportStats); btnsTop.appendChild(btnExpStat);
+            var btnExpCsv = document.createElement('input'); btnExpCsv.type = 'button'; btnExpCsv.className = 'cbi-button cbi-button-action'; btnExpCsv.value = 'Export Users (CSV)'; btnExpCsv.title = 'Export users configuration list'; btnExpCsv.addEventListener('click', doExportCSV); btnsTop.appendChild(btnExpCsv);
+            var btnImpCsv = document.createElement('input'); btnImpCsv.type = 'button'; btnImpCsv.className = 'cbi-button cbi-button-action'; btnImpCsv.value = 'Import (CSV)'; btnImpCsv.addEventListener('click', showImportModal); btnsTop.appendChild(btnImpCsv);
             topRow.appendChild(btnsTop); dash.appendChild(topRow);
             userTarget.insertBefore(dash, userTable);
         }
@@ -1142,7 +1129,6 @@ function isTemplateRow(row) {
 }
 
 function injectUI() {
-    ['start', 'stop', 'restart'].forEach(function(act) { var btn = document.getElementById('btn_telemt_' + act); if(btn && !btn.dataset.bound) { btn.dataset.bound = "1"; btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); var sEl = document.getElementById('dash_status'); if (sEl) { sEl.innerText = (act==='stop' ? 'STOPPING...' : 'STARTING...'); sEl.style.color = '#d35400'; } logAction('Manual ' + act); postAction(act); }); } });
     fixTabIsolation();
     scheduleRepack(); 
     

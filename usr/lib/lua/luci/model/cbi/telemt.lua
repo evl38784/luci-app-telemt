@@ -802,7 +802,11 @@ function renderHealthGrid(apiData, promText) {
     
     var mode = rt.route_mode || "direct";
     var meRdy = rt.me_runtime_ready ? '<span class="badge badge-ok">ME: Ready</span>' : '<span class="badge badge-gray">ME: Disabled</span>';
-    var fb = rt.me2dc_fallback_enabled ? '<span class="badge badge-err">Fallback: ON</span>' : '<span class="badge badge-ok">Fallback: OFF</span>';
+    // PATCH 3.3.16: me2dc_fallback_enabled does NOT exist in API (model.rs verified).
+    // Real signal: any writer with degraded=true means fallback/reroute is active.
+    var _meWr = (st && st.me_writers && Array.isArray(st.me_writers.writers)) ? st.me_writers.writers : [];
+    var _hasDegraded = _meWr.some(function(w){ return w && w.degraded; });
+    var fb = _hasDegraded ? '<span class="badge badge-err">Fallback: ON</span>' : '<span class="badge badge-ok">Fallback: OFF</span>';
     var rroute = rt.reroute_active ? '<span class="badge badge-err">Reroute: ON</span>' : '<span class="badge badge-ok">Reroute: OFF</span>';
     var acc = rt.accepting_new_connections ? '<span class="badge badge-ok">Accepting</span>' : '<span class="badge badge-err">Rejecting</span>';
     
@@ -841,7 +845,7 @@ function renderHealthGrid(apiData, promText) {
                 var dc = dcs[k] || {};
                 var coverage = Number(dc.coverage_pct || 0);
                 var covCol = coverage >= 100 ? '<span style="color:#00a000">' + coverage + '%</span>' : '<span style="color:#d9534f">' + coverage + '%</span>';
-                dHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1">DC ' + escHTML(String(dc.dc || '-')) + '</div><div style="flex:0 0 100px; text-align:right;">' + (dc.alive_writers || 0) + ' / ' + (dc.required_writers || 0) + '</div><div style="flex:0 0 70px; text-align:right;">' + covCol + '</div><div style="flex:0 0 60px; text-align:right;">' + (dc.rtt_ema_ms || 0) + 'ms</div></div>';
+                dHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1">DC ' + escHTML(String(dc.dc || '-')) + '</div><div style="flex:0 0 100px; text-align:right;">' + (dc.alive_writers || 0) + ' / ' + (dc.required_writers || 0) + '</div><div style="flex:0 0 70px; text-align:right;">' + covCol + '</div><div style="flex:0 0 60px; text-align:right;">' + (dc.rtt_ms || dc.rtt_ema_ms || 0) + 'ms</div></div>';
             }
             dDc.innerHTML = dHtml;
         } else if (rt && rt.me_runtime_ready) {

@@ -167,15 +167,11 @@ if http.formvalue("get_metrics") == "1" then
         local prom_str = http_get_local("http://127.0.0.1:" .. m_port .. "/metrics", 2)
         -- STARTING STATE FIX: Ensure UI knows daemon is alive but booting
         if prom_str == "" then metrics = metrics .. "# telemt_state=starting\n" else metrics = metrics .. prom_str end
-        
-        if ext_rt == "1" then
-            metrics = metrics .. "\n---TELEMT_API_JSON---\n"
-            local api_json = http_get_local("http://127.0.0.1:" .. api_port .. "/v1/stats/minimal/all", 2)
-            metrics = metrics .. ((api_json ~= "" and api_json) or "{}")
-        end
     end
     
     -- READ RACE CONDITION FIX: Atomic copy before parsing accumulated stats
+    -- CRITICAL ORDER FIX: ACCUMULATED must come BEFORE ---TELEMT_API_JSON--- separator
+    -- so that JSON.parse(parts[1]) in JS gets clean JSON without extra lines appended.
     sys.call("cp -f /tmp/telemt_stats.txt /tmp/telemt_stats_read.tmp 2>/dev/null")
     local f = io.open("/tmp/telemt_stats_read.tmp", "r")
     if f then
@@ -185,6 +181,18 @@ if http.formvalue("get_metrics") == "1" then
             if u then metrics = metrics .. string.format("telemt_accumulated_tx{user=\"%s\"} %s\ntelemt_accumulated_rx{user=\"%s\"} %s\n", u, tx, u, rx) end
         end
         f:close()
+    end
+    
+    -- API JSON MUST be last: JS does split('---TELEMT_API_JSON---') and JSON.parse(parts[1])
+    -- Any text after the JSON breaks parse. Keep this block at the very end of the response.
+    if pid ~= "" then
+        local ext_rt = uci_cursor:get("telemt", "general", "extended_runtime_enabled") or "1"
+        local api_port = tonumber(uci_cursor:get("telemt", "general", "api_port")) or 9091
+        if ext_rt == "1" then
+            metrics = metrics .. "\n---TELEMT_API_JSON---\n"
+            local api_json = http_get_local("http://127.0.0.1:" .. api_port .. "/v1/stats/minimal/all", 2)
+            metrics = metrics .. ((api_json ~= "" and api_json) or "{}")
+        end
     end
     
     http.prepare_content("text/plain"); pcall(function() http.write(metrics) end); end_ajax(); return

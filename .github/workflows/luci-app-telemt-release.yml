@@ -74,13 +74,15 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y dos2unix
 
       # ─────────────────────────────────────────────────────────────────────────
-      # 5. Fix CRLF line endings in install scripts
+      # 5. Fix CRLF line endings and UTF-8 BOM in install scripts
       #    CRITICAL: prevents "not found" errors in OpenWrt's POSIX sh
+      #    BOM (0xEF 0xBB 0xBF) before shebang breaks exec on some sh implementations
       # ─────────────────────────────────────────────────────────────────────────
-      - name: Fix CRLF in scripts
+      - name: Fix CRLF and BOM in scripts
         run: |
           if [ -d scripts ]; then
             find scripts -type f | xargs dos2unix
+            find scripts -type f | xargs sed -i '1s/^\xef\xbb\xbf//'
           fi
 
       # ─────────────────────────────────────────────────────────────────────────

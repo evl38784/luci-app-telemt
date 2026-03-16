@@ -1,6 +1,6 @@
 <div align="center">
   <h1>🏗️ Project Architecture & Workflow</h1>
-  <p><b>luci-app-telemt v3.1.0</b> | <i>How the Web UI, Init System, and Binary work together</i></p>
+  <p><b>luci-app-telemt v3.3.16</b> | <i>How the Web UI, Init System, and Binary work together</i></p>
 </div>
 
 <hr>

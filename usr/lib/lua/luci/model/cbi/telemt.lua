@@ -73,6 +73,20 @@ local is_ajax = (http.getenv("REQUEST_METHOD") == "POST" or http.formvalue("get_
 -- ==============================================================================
 local is_post = (http.getenv("REQUEST_METHOD") == "POST")
 
+-- CSRF protection: all mutating POST actions require a valid LuCI request token.
+-- The JS client already sends the token (from input[name="token"] or L.env.token).
+-- Without this check an authenticated admin could be tricked into triggering
+-- service actions via a cross-origin form submission.
+if is_post then
+    local tok = http.formvalue("token")
+    if not tok or tok ~= http.formtoken() then
+        http.status(403, "Forbidden")
+        http.prepare_content("text/plain")
+        pcall(function() http.write("CSRF token mismatch") end)
+        end_ajax(); return
+    end
+end
+
 if is_post and http.formvalue("log_ui_event") == "1" then
     local msg = http.formvalue("msg")
     if msg then
@@ -845,7 +859,8 @@ function lst.cfgvalue(self, section)
         self.map:get(section, "enabled") or "1"
     return string.format(
         '<div class="user-flat-stat" data-user="%s" data-q="%s" data-e="%s" data-en="%s"><span style="color:#888;">No Data</span></div>',
-        section:gsub("[<>&\"']", ""), q, e, en)
+        section:gsub("[<>&\"']", ""),
+        q:gsub("[<>&\"']", ""), e:gsub("[<>&\"']", ""), en:gsub("[<>&\"']", ""))
 end
 
 local lnk = s2:option(DummyValue, "_link", "Ready-to-use link" .. tip("Click the link to copy it.")); lnk.rawhtml = true; function lnk.cfgvalue(
@@ -911,6 +926,7 @@ div[id^="cbi-telemt-advanced-_head_adv"] .cbi-value-field, div[id^="cbi-telemt-a
 .badge-err { background:rgba(217,83,79,0.1); color:#d9534f; border:1px solid rgba(217,83,79,0.3); }
 .badge-gray { background:rgba(128,128,128,0.1); color:#888; border:1px solid rgba(128,128,128,0.3); }
 .badge-info { background:rgba(0,105,214,0.1); color:#0069d6; border:1px solid rgba(0,105,214,0.3); }
+.badge-warn { background:rgba(240,173,78,0.15); color:#b07d00; border:1px solid rgba(240,173,78,0.4); }
 #cbi-telemt-log-_diag .cbi-value-title { display: none !important; }
 #cbi-telemt-log-_diag .cbi-value-field { width: 100% !important; padding: 0 !important; margin: 0 !important; float: none !important; }
 </style>
@@ -1035,10 +1051,15 @@ function renderHealthGrid(apiData, promText, upData) {
     var badMatch2 = promText.match(/telemt_me_handshake_reject_total\s+([0-9\.]+)/);
     var scans = (badMatch1 ? parseInt(badMatch1[1], 10) : 0) + (badMatch2 ? parseInt(badMatch2[1], 10) : 0);
 
-    var upActiveMatch = promText.match(/telemt_upstream_connects_active\s+([0-9\.]+)/);
-    var upFailsMatch = promText.match(/telemt_upstream_fails_total\s+([0-9\.]+)/);
-    var promUpActive = upActiveMatch ? upActiveMatch[1] : '0';
-    var promUpFails = upFailsMatch ? upFailsMatch[1] : '0';
+    var upActiveMatch  = promText.match(/telemt_upstream_connects_active\s+([0-9\.]+)/);
+    var upFailsMatch   = promText.match(/telemt_upstream_fails_total\s+([0-9\.]+)/);
+    var upAttemptMatch = promText.match(/telemt_upstream_connect_attempt_total\s+([0-9\.]+)/);
+    var upSuccessMatch = promText.match(/telemt_upstream_connect_success_total\s+([0-9\.]+)/);
+    var promUpActive  = upActiveMatch  ? upActiveMatch[1]  : '0';
+    var promUpFails   = upFailsMatch   ? upFailsMatch[1]   : '0';
+    var _upAttempts   = upAttemptMatch ? parseInt(upAttemptMatch[1], 10) : 0;
+    var _upSuccesses  = upSuccessMatch ? parseInt(upSuccessMatch[1], 10) : 0;
+    var _upSuccessRate = (_upAttempts > 0) ? Math.round(_upSuccesses / _upAttempts * 100) + '%' : null;
 
     // DPI badges: gray when counter is 0 (normal), red only when attacks are detected.
     var promBadges =
@@ -1062,10 +1083,15 @@ function renderHealthGrid(apiData, promText, upData) {
         var promSummary = hasAnyProm
             ? '<div style="margin-top:8px; font-size:0.9em; color:#555;">' + uptimeTxt + connTxt +
               ' &nbsp;<b>Active Connects:</b> ' + promUpActive +
-              ' &nbsp;<b>Connect Fails:</b> ' + promUpFails + '</div>'
+              ' &nbsp;<b>Connect Fails:</b> ' + promUpFails +
+              (_upSuccessRate ? ' &nbsp;<b>Success Rate:</b> ' + _upSuccessRate : '') + '</div>'
             : '';
         if(dg) dg.innerHTML = apiMsg + promBadges + promSummary;
-        if(dUp) dUp.innerHTML = '<div style="color:#888; padding:10px;">Detailed upstream table requires Control API to be enabled.<br><br><b>Active Connects:</b> ' + promUpActive + ' &nbsp;<b>Fails:</b> ' + promUpFails + '</div>';
+        if(dUp) dUp.innerHTML = '<div style="color:#888; padding:10px;">Detailed upstream table requires Control API.<br><br>' +
+            '<b>Active Connects:</b> ' + promUpActive + ' &nbsp;|&nbsp; <b>Fails:</b> ' + promUpFails +
+            (_upSuccessRate ? ' &nbsp;|&nbsp; <b>Connect Success Rate:</b> ' + _upSuccessRate : '') +
+            (_upAttempts > 0 ? ' &nbsp;(' + _upSuccesses + '/' + _upAttempts + ' attempts)' : '') +
+            '</div>';
         if(dDc) dDc.innerHTML = '<div style="color:#888; padding:10px;">DC table requires Control API to be enabled.</div>';
         return;
     }
@@ -1077,6 +1103,14 @@ function renderHealthGrid(apiData, promText, upData) {
         : '<span class="badge badge-gray" title="Middle-End Proxy is disabled in config">ME: Off</span>';
     var _meWr = (st && st.me_writers && Array.isArray(st.me_writers.writers)) ? st.me_writers.writers : [];
     var _hasDegraded = _meWr.some(function(w){ return w && w.degraded; });
+    // ME writer pool health badge — only meaningful when ME is active
+    var meWriterBadge = '';
+    if (mode === 'middle' && _meWr.length > 0) {
+        var _wrAlive = _meWr.filter(function(w){ return w && !w.degraded; }).length;
+        var _wrCls = _wrAlive === _meWr.length ? 'badge-ok' : (_wrAlive > 0 ? 'badge-warn' : 'badge-err');
+        var _wrPct = Math.round(_wrAlive / _meWr.length * 100);
+        meWriterBadge = '<span class="badge ' + _wrCls + '" title="ME writer pool: alive writers / total (' + _wrPct + '%)">Writers: ' + _wrAlive + '/' + _meWr.length + '</span>';
+    }
     var fb = _hasDegraded
         ? '<span class="badge badge-err" title="ME endpoints failed — traffic falling back to Direct DC">Fallback: Active</span>'
         : '<span class="badge badge-ok" title="No degradation, routing normally">Fallback: Off</span>';
@@ -1090,10 +1124,19 @@ function renderHealthGrid(apiData, promText, upData) {
     var dcsCount = 0;
     if (st && st.dcs && typeof st.dcs === 'object' && Array.isArray(st.dcs.dcs)) { dcsCount = st.dcs.dcs.length; }
     else if (st && Array.isArray(st.dcs)) { dcsCount = st.dcs.length; }
-    // In Direct mode the ME pool has no persistent DC entries — show an informational badge instead of grey "DCs: 0"
-    var dcsBadge = (mode === 'direct')
-        ? '<span class="badge badge-info" title="Direct DC mode: binary connects to Telegram DCs on demand, no persistent pool">Direct DC</span>'
-        : '<span class="badge ' + (dcsCount > 0 ? 'badge-ok' : 'badge-gray') + '" title="Telegram DCs in ME pool">DCs: ' + dcsCount + '</span>';
+    // In Direct mode show upstream health instead of a redundant "Direct DC" badge (Mode badge already says that).
+    // In ME mode show the DC pool count.
+    var dcsBadge = '';
+    if (mode === 'direct') {
+        var _upsForBadge = (upData && upData.ok && upData.data && Array.isArray(upData.data.upstreams)) ? upData.data.upstreams : null;
+        if (_upsForBadge && _upsForBadge.length > 0) {
+            var _upOk = _upsForBadge.filter(function(u){ return u && u.healthy; }).length;
+            var _upCls = _upOk === _upsForBadge.length ? 'badge-ok' : (_upOk > 0 ? 'badge-warn' : 'badge-err');
+            dcsBadge = '<span class="badge ' + _upCls + '" title="Upstream proxy health (healthy/total)">Upstream: ' + _upOk + '/' + _upsForBadge.length + ' OK</span>';
+        }
+    } else {
+        dcsBadge = '<span class="badge ' + (dcsCount > 0 ? 'badge-ok' : 'badge-gray') + '" title="Telegram DCs in ME pool">DCs: ' + dcsCount + '</span>';
+    }
 
     var npBadge = '';
     if (st && Array.isArray(st.network_path) && st.network_path.length > 0) {
@@ -1102,7 +1145,7 @@ function renderHealthGrid(apiData, promText, upData) {
 
     if(dg) dg.innerHTML =
         '<span class="badge ' + (mode === 'middle' ? 'badge-ok' : 'badge-info') + '" title="Current outbound routing mode">Mode: ' + escHTML(modeLabel) + '</span>' +
-        meRdy + fb + rroute + dcsBadge + npBadge + acc + promBadges;
+        meRdy + meWriterBadge + fb + rroute + dcsBadge + npBadge + acc + promBadges;
 
     if (dUp) {
         var upRendered = false;
@@ -1112,11 +1155,12 @@ function renderHealthGrid(apiData, promText, upData) {
             : (st && st.upstreams && Array.isArray(st.upstreams) && st.upstreams.length > 0 ? st.upstreams : null);
         if (upsFromApi) {
             var ups = upsFromApi;
-            var uHtml = '<div style="display:flex; justify-content:space-between; font-weight:bold; color:#888; border-bottom:1px solid rgba(128,128,128,0.3); padding-bottom:4px; margin-bottom:4px;"><div style="flex:1">Address</div><div style="flex:0 0 60px; text-align:right;">Status</div><div style="flex:0 0 50px; text-align:right;">Fails</div><div style="flex:0 0 60px; text-align:right;">Lat</div></div>';
+            var uHtml = '<div style="display:flex; justify-content:space-between; font-weight:bold; color:#888; border-bottom:1px solid rgba(128,128,128,0.3); padding-bottom:4px; margin-bottom:4px;"><div style="flex:1">Address</div><div style="flex:0 0 60px; text-align:right;">Status</div><div style="flex:0 0 50px; text-align:right;">Fails</div><div style="flex:0 0 75px; text-align:right;">Lat</div></div>';
             for (var i=0; i<ups.length; i++) {
                 var up = ups[i] || {};
                 var stCol = up.healthy ? '<span style="color:#00a000">OK</span>' : '<span style="color:#d9534f">FAIL</span>';
-                uHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1; word-break:break-all; padding-right:5px;">' + escHTML(up.address || '-') + '</div><div style="flex:0 0 60px; text-align:right;">' + stCol + '</div><div style="flex:0 0 50px; text-align:right;">' + (up.fails || 0) + '</div><div style="flex:0 0 60px; text-align:right;">' + (up.effective_latency_ms || 0) + 'ms</div></div>';
+                var latStr = (up.effective_latency_ms != null) ? parseFloat(up.effective_latency_ms).toFixed(1) + 'ms' : '—';
+                uHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1; word-break:break-all; padding-right:5px;">' + escHTML(up.address || '-') + '</div><div style="flex:0 0 60px; text-align:right;">' + stCol + '</div><div style="flex:0 0 50px; text-align:right;">' + (up.fails || 0) + '</div><div style="flex:0 0 75px; text-align:right;">' + latStr + '</div></div>';
             }
             dUp.innerHTML = uHtml; upRendered = true;
         }
@@ -1170,16 +1214,18 @@ function renderHealthGrid(apiData, promText, upData) {
             dDc.innerHTML = directHtml;
         } else if (rt && rt.me_runtime_ready) {
             dDc.innerHTML = '<div style="text-align:center; color:#d35400; padding:10px;">Waiting for DC connections...</div>';
-        } else if (parsed.reason === 'source_unavailable') {
-            dDc.innerHTML = '<div style="color:#888; padding:10px;">DC detailed stats unavailable.</div>';
         } else if (mode === 'direct') {
+            // Direct mode: /v1/stats/dcs always returns reason:"source_unavailable" — show informational message.
             dDc.innerHTML = '<div style="color:#0069d6; padding:10px;">' +
                 '<b>Direct DC mode</b><br>' +
                 '<span style="font-size:0.9em; color:#555;">The binary connects to Telegram DCs on demand per session. ' +
                 'No persistent DC pool is maintained. DC reachability is checked at handshake time.</span>' +
                 '<div style="margin-top:8px; font-size:0.9em;">' +
                 '<b>Active connects:</b> ' + promUpActive + ' &nbsp;|&nbsp; <b>Fails:</b> ' + promUpFails +
+                (_upSuccessRate ? ' &nbsp;|&nbsp; <b>Success:</b> ' + _upSuccessRate : '') +
                 '</div></div>';
+        } else if (parsed.reason === 'source_unavailable') {
+            dDc.innerHTML = '<div style="color:#888; padding:10px;">DC detailed stats unavailable.</div>';
         } else {
             dDc.innerHTML = '<div style="text-align:center; color:#888; padding:10px;">DC list empty or proxy disabled</div>';
         }

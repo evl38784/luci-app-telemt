@@ -1,1 +1,4 @@
 *.ipk
+.vscode/sftp.json
+.vscode/settings.json
+.DS_Store

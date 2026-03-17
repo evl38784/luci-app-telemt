@@ -1,6 +1,6 @@
 -- ==============================================================================
 -- Telemt CBI Model (Configuration Binding Interface)
--- Version: 3.3.20 (white theme hover fix, memory thresholds, mobile polish, OWrt25 fallback)
+-- Version: 3.3.21 (TG PATH/EGRESS badges, unique IPs, runtime info, mobile summary)
 -- ==============================================================================
 
 local sys = require "luci.sys"
@@ -242,6 +242,9 @@ if http.formvalue("get_metrics") == "1" then
     local ext_rt = uci_cursor:get("telemt", "general", "extended_runtime_enabled") or "1"
 
     local metrics = ""
+    -- Pass UCI config flags to JS for runtime_view computation
+    local uci_use_mp = uci_cursor:get("telemt", "general", "use_middle_proxy") or "0"
+    metrics = metrics .. "# telemt_uci_use_mp=" .. uci_use_mp .. "\n"
     local memfile = io.open("/proc/meminfo", "r")
     if memfile then
         local memtxt = memfile:read("*all"); memfile:close()
@@ -449,7 +452,7 @@ if bin_path ~= "" then
 end
 
 m = Map("telemt", "Telegram Proxy (MTProto)",
-    [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.3.20</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.3.15+</span>]])
+    [[Multi-user proxy server based on <a href="https://github.com/telemt/telemt" target="_blank" style="text-decoration:none; color:inherit; font-weight:bold; border-bottom: 1px dotted currentColor;">telemt</a>.<br><b>LuCI App Version: <a href="https://github.com/Medvedolog/luci-app-telemt" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dotted currentColor;">3.3.21</a></b> | <span style='color:#d35400; font-weight:bold;'>Requires telemt v3.3.15+</span>]])
 m.on_commit = function(self)
     sys.call(
         "logger -t telemt 'WebUI: Config saved. Dumping stats before procd reload...'; /etc/init.d/telemt run_save_stats 2>/dev/null")
@@ -934,7 +937,7 @@ diag.default = [[
                 <div id="diag_upstreams" style="max-height:250px; overflow-y:auto; overflow-x:hidden;">Loading...</div>
             </div>
             <div style="flex:1 1 300px; background:rgba(128,128,128,0.03); border:1px solid rgba(128,128,128,0.2); border-radius:6px; padding:15px; box-sizing:border-box;">
-                <h4 style="margin-top:0; color:#0069d6; border-bottom:1px dashed #ccc; padding-bottom:5px;">Datacenters</h4>
+                <h4 id="diag_dcs_title" style="margin-top:0; color:#0069d6; border-bottom:1px dashed #ccc; padding-bottom:5px;">Datacenters</h4>
                 <div id="diag_dcs" style="max-height:250px; overflow-y:auto; overflow-x:hidden;">Loading...</div>
             </div>
         </div>
@@ -952,6 +955,7 @@ diag.default = [[
     <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
         <input type="button" class="cbi-button cbi-button-apply" id="btn_load_log" value="System Log" />
         <input type="button" class="cbi-button cbi-button-reset" id="btn_load_scanners" value="Show Active Scanners" />
+        <input type="button" class="cbi-button cbi-button-neutral" id="btn_runtime_info" value="Runtime Info" />
         <input type="button" class="cbi-button cbi-button-action" id="btn_copy_log" value="Copy Output" />
     </div>
 </div>
@@ -961,6 +965,8 @@ setTimeout(function(){
     document.getElementById('btn_load_log').addEventListener('click', loadLog);
     document.getElementById('btn_load_scanners').addEventListener('click', loadScanners);
     document.getElementById('btn_copy_log').addEventListener('click', function(){ copyLogContent(this); });
+    var rtBtn = document.getElementById('btn_runtime_info');
+    if (rtBtn) rtBtn.addEventListener('click', loadRuntimeInfo);
 
     document.getElementById('btn_export_config').addEventListener('click', function() {
         var fd = new FormData(); fd.append('export_config', '1');
@@ -1098,12 +1104,16 @@ div[id^="cbi-telemt-advanced-_head_adv"] .cbi-value-field, div[id^="cbi-telemt-a
 .user-flat-stat > * { margin-right: 4px; }
 .user-flat-stat > *:last-child { margin-right: 0; }
 .stat-divider, .sum-divider { color: #ccc; margin: 0 4px; }
+.sum-row { display: inline; }
+.sum-row::after { content: ' | '; color: #ccc; }
+.sum-row:last-child::after { content: ''; }
+.telemt-dash-summary { line-height: 1.6; }
 .btn-controls input { width: auto; margin-right: 5px; }
 .link-btn-group { display: flex; margin-top: 4px; }
 .telemt-conns-bold { font-weight: bold; }
 
 @media screen and (min-width: 769px) { #cbi-telemt-user .cbi-section-table { width: 100% !important; table-layout: auto !important; } #cbi-telemt-user .cbi-section-table td { padding: 6px 8px !important; white-space: nowrap !important; vertical-align: middle !important; } .user-flat-stat, .user-flat-stat > div { flex-wrap: nowrap !important; white-space: nowrap !important; } td[data-name="_stat"] { min-width: 180px !important; } td[data-name="max_tcp_conns"] .telemt-num-wrap, td[data-name="max_unique_ips"] .telemt-num-wrap, td[data-name="data_quota"] .telemt-num-wrap { max-width: 95px !important; } td[data-name="expire_date"] { min-width: 155px !important; } td[data-name="expire_date"] .telemt-num-wrap { min-width: 155px !important; width: 100% !important; } td[data-name="_link"] .link-wrapper { min-width: 160px !important; } td[data-name="secret"] .telemt-sec-wrap { min-width: 160px !important; } .telemt-action-btns { display: flex !important; align-items: center !important; justify-content: flex-start !important; gap: 10px !important; flex-wrap: wrap; padding: 10px 12px; background: rgba(128,128,128,0.04); border: 1px solid rgba(128,128,128,0.15); border-radius: 6px; margin-bottom: 15px; } .telemt-action-btns input.cbi-button { float: none !important; margin: 0 !important; display: inline-block !important; position: static !important; } .telemt-dash-top-row { display:flex; align-items:center; padding:12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.2); border-radius:6px; margin-bottom:10px; flex-wrap:wrap; gap:15px; } .telemt-dash-bot-row { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:10px; margin-bottom:15px; text-align:center; width:100%; } .telemt-dash-warn { font-size:1em; color:#d35400; font-weight:bold; text-align:center; } }
-@media screen and (max-width: 768px) { #telemt_mirror_ip, input[name*="cbid.telemt.general.external_ip"] { flex: 1 1 100% !important; width: 100% !important; max-width: 100% !important; } #cbi-telemt-user .cbi-section-table .cbi-section-table-row { display: flex !important; flex-direction: column !important; margin-bottom: 15px !important; border: 1px solid var(--border-color, #ddd) !important; padding: 10px !important; border-radius: 6px !important; } #cbi-telemt-user .cbi-section-table td { display: block !important; width: 100% !important; box-sizing: border-box !important; padding: 6px 0 !important; border: none !important; white-space: normal !important; } #cbi-telemt-user .cbi-section-table td[data-title]::before { content: attr(data-title) !important; display: block !important; font-weight: bold !important; margin-bottom: 4px !important; color: var(--text-color, #555) !important; } #cbi-telemt-user .cbi-section-actions .cbi-button::before, #cbi-telemt-user td .cbi-button::before { display: none !important; content: none !important; } #cbi-telemt-user .cbi-section-actions, #cbi-telemt-user td.cbi-section-actions, #cbi-telemt-user .cbi-section-table td:last-child { display: block !important; visibility: visible !important; opacity: 1 !important; padding: 10px 0 0 0 !important; overflow: visible !important; width: 100% !important; } html body #cbi-telemt-user .cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross), html body #cbi-telemt-user td.cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross) { display: flex !important; width: 100% !important; height: 44px !important; line-height: 44px !important; align-items: center !important; justify-content: center !important; } .user-flat-stat, .user-flat-stat > div { flex-direction: column; align-items: flex-start; flex-wrap: wrap !important; } .stat-divider, .sum-divider { display: none !important; } .telemt-dash-btns, .telemt-action-btns { flex-direction: row; flex-wrap: wrap; width: 100%; gap: 8px !important; margin-top:0; padding: 10px; background: rgba(128,128,128,0.04); border: 1px solid rgba(128,128,128,0.15); border-radius: 6px; margin-bottom: 15px; box-sizing: border-box; } .telemt-dash-btns input.cbi-button, .telemt-action-btns input.cbi-button { flex: 1 1 calc(50% - 4px) !important; height: 36px !important; } .link-btn-group { flex-direction: row !important; width: 100%; display: flex; margin-top: 5px; } .telemt-sec-btns input.cbi-button, .link-btn-group input.cbi-button { height: 32px !important; min-height: 32px !important; line-height: 30px !important; font-size: 13px !important; margin-right: 5px; } .telemt-dash-top-row { display:flex; padding:12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.2); border-radius:6px; margin-bottom:10px; } .telemt-dash-bot-row { display:flex; flex-direction:column; margin-bottom:15px; gap:15px; text-align:center; } }
+@media screen and (max-width: 768px) { #telemt_mirror_ip, input[name*="cbid.telemt.general.external_ip"] { flex: 1 1 100% !important; width: 100% !important; max-width: 100% !important; } #cbi-telemt-user .cbi-section-table .cbi-section-table-row { display: flex !important; flex-direction: column !important; margin-bottom: 15px !important; border: 1px solid var(--border-color, #ddd) !important; padding: 10px !important; border-radius: 6px !important; } #cbi-telemt-user .cbi-section-table td { display: block !important; width: 100% !important; box-sizing: border-box !important; padding: 6px 0 !important; border: none !important; white-space: normal !important; } #cbi-telemt-user .cbi-section-table td[data-title]::before { content: attr(data-title) !important; display: block !important; font-weight: bold !important; margin-bottom: 4px !important; color: var(--text-color, #555) !important; } #cbi-telemt-user .cbi-section-actions .cbi-button::before, #cbi-telemt-user td .cbi-button::before { display: none !important; content: none !important; } #cbi-telemt-user .cbi-section-actions, #cbi-telemt-user td.cbi-section-actions, #cbi-telemt-user .cbi-section-table td:last-child { display: block !important; visibility: visible !important; opacity: 1 !important; padding: 10px 0 0 0 !important; overflow: visible !important; width: 100% !important; } html body #cbi-telemt-user .cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross), html body #cbi-telemt-user td.cbi-section-actions .cbi-button-remove:not(.telemt-btn-cross) { display: flex !important; width: 100% !important; height: 44px !important; line-height: 44px !important; align-items: center !important; justify-content: center !important; } .user-flat-stat, .user-flat-stat > div { flex-direction: column; align-items: flex-start; flex-wrap: wrap !important; } .stat-divider, .sum-divider { display: none !important; } .sum-row { display: block !important; padding: 1px 0; } .sum-row::after { display: none !important; } .telemt-dash-summary { line-height: 1.8 !important; font-size: 0.92em !important; } .telemt-dash-btns, .telemt-action-btns { flex-direction: row; flex-wrap: wrap; width: 100%; gap: 8px !important; margin-top:0; padding: 10px; background: rgba(128,128,128,0.04); border: 1px solid rgba(128,128,128,0.15); border-radius: 6px; margin-bottom: 15px; box-sizing: border-box; } .telemt-dash-btns input.cbi-button, .telemt-action-btns input.cbi-button { flex: 1 1 calc(50% - 4px) !important; height: 36px !important; } .link-btn-group { flex-direction: row !important; width: 100%; display: flex; margin-top: 5px; } .telemt-sec-btns input.cbi-button, .link-btn-group input.cbi-button { height: 32px !important; min-height: 32px !important; line-height: 30px !important; font-size: 13px !important; margin-right: 5px; } .telemt-dash-top-row { display:flex; padding:12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.2); border-radius:6px; margin-bottom:10px; } .telemt-dash-bot-row { display:flex; flex-direction:column; margin-bottom:15px; gap:15px; text-align:center; } }
 .qr-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2147483647 !important; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
 .qr-modal-overlay.active { opacity: 1; pointer-events: auto; }
 .custom-modal-content { background-color: #1e1e1e !important; color: #dddddd !important; padding: 20px; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); border: 1px solid #444 !important; text-align: center; max-width: 450px; width: 90%; }
@@ -1250,15 +1260,33 @@ function renderHealthGrid(apiData, promText, upData) {
     var _upSuccesses  = upSuccessMatch ? parseInt(upSuccessMatch[1], 10) : 0;
     var _upSuccessRate = (_upAttempts > 0) ? Math.round(_upSuccesses / _upAttempts * 100) + '%' : null;
 
-    // DPI badges: gray when counter is 0 (normal), red only when attacks are detected.
+    // DPI and rejection badges
     var promBadges =
-        '<span class="badge ' + (probes > 0 ? 'badge-err' : 'badge-gray') + '" title="DPI probe attempts detected since last restart. These are TLS handshakes that failed crypto validation — likely ISP deep packet inspection.">DPI Probes: ' + probes + '</span>' +
-        '<span class="badge ' + (scans > 0 ? 'badge-err' : 'badge-gray') + '" title="Connections rejected as invalid or scanner-like. Includes port scanners, bots, and malformed handshakes.">Scanned: ' + scans + '</span>';
+        '<span class="badge ' + (probes > 0 ? 'badge-err' : 'badge-gray') + '" title="DPI traffic tampering events (crypto desync). 0 means ISP is not modifying encrypted streams.">DPI Tamper: ' + probes + '</span>' +
+        '<span class="badge ' + (scans > 0 ? 'badge-err' : 'badge-gray') + '" title="Total rejected connections: port scanners, bots, invalid handshakes, bad keys.">Rejected: ' + scans + '</span>';
 
     var parsed = parseApiResponse(apiData);
     var rt = parsed.runtime;
     var st = parsed.stats;
     var apiOk = parsed.ok;
+
+    // Compute egress type from upstream data
+    var _uciUseMp = promText.match(/# telemt_uci_use_mp=(\d)/);
+    var uciMpEnabled = _uciUseMp ? (_uciUseMp[1] === '1') : false;
+
+    function computeEgress(upData) {
+        var ups = (upData && upData.ok && upData.data && Array.isArray(upData.data.upstreams)) ? upData.data.upstreams : [];
+        var healthy = ups.filter(function(u) { return u && u.healthy; });
+        if (healthy.length === 0) return { type: 'Direct', ok: 0, total: ups.length };
+        var types = {};
+        healthy.forEach(function(u) { types[u.type || 'direct'] = true; });
+        var keys = Object.keys(types);
+        var label = keys.length > 1 ? 'Mixed' : (keys[0] || 'Direct').toUpperCase();
+        if (label === 'DIRECT') label = 'Direct';
+        else if (label === 'SOCKS5') label = 'SOCKS5';
+        else if (label === 'SOCKS4') label = 'SOCKS4';
+        return { type: label, ok: healthy.length, total: ups.length };
+    }
 
     if (!apiOk || !rt) {
         var hasAnyProm = promText.indexOf('telemt_') > -1;
@@ -1267,74 +1295,87 @@ function renderHealthGrid(apiData, promText, upData) {
         var uptimeTxt = uptimeM ? ' &nbsp;<b>Uptime:</b> ' + formatUptime(parseFloat(uptimeM[1])) : '';
         var connTxt   = connM   ? ' &nbsp;<b>Total conns:</b> ' + parseInt(connM[1], 10) : '';
         var apiMsg = hasAnyProm
-            ? '<span class="badge badge-gray" title="Control API is disabled or not responding. Prometheus metrics are shown below.">API: Off &mdash; Prometheus Only</span>'
+            ? '<span class="badge badge-gray" title="Control API is disabled or not responding. Prometheus metrics are shown.">API: Off</span>'
             : '<span class="badge badge-err" title="No telemt metrics received. Daemon may be stopped or in early boot.">No Metrics</span>';
         var promSummary = hasAnyProm
             ? '<div style="margin-top:8px; font-size:0.9em; color:#555;">' + uptimeTxt + connTxt +
               ' &nbsp;<b>Active Connects:</b> ' + promUpActive +
-              ' &nbsp;<b>Connect Fails:</b> ' + promUpFails +
-              (_upSuccessRate ? ' &nbsp;<b>Success Rate:</b> ' + _upSuccessRate : '') + '</div>'
+              ' &nbsp;<b>Fails:</b> ' + promUpFails +
+              (_upSuccessRate ? ' &nbsp;<b>Success:</b> ' + _upSuccessRate : '') + '</div>'
             : '';
         if(dg) dg.innerHTML = apiMsg + promBadges + promSummary;
-        if(dUp) dUp.innerHTML = '<div style="color:#888; padding:10px;">Detailed upstream table requires Control API.<br><br>' +
+        if(dUp) dUp.innerHTML = '<div style="color:#888; padding:10px;">Upstream table requires Control API.<br><br>' +
             '<b>Active Connects:</b> ' + promUpActive + ' &nbsp;|&nbsp; <b>Fails:</b> ' + promUpFails +
-            (_upSuccessRate ? ' &nbsp;|&nbsp; <b>Connect Success Rate:</b> ' + _upSuccessRate : '') +
-            (_upAttempts > 0 ? ' &nbsp;(' + _upSuccesses + '/' + _upAttempts + ' attempts)' : '') +
+            (_upSuccessRate ? ' &nbsp;|&nbsp; <b>Success:</b> ' + _upSuccessRate : '') +
+            (_upAttempts > 0 ? ' &nbsp;(' + _upSuccesses + '/' + _upAttempts + ')' : '') +
             '</div>';
-        if(dDc) dDc.innerHTML = '<div style="color:#888; padding:10px;">DC table requires Control API to be enabled.</div>';
+        if(dDc) dDc.innerHTML = '<div style="color:#888; padding:10px;">Runtime details require Control API.</div>';
         return;
     }
 
+    // Compute runtime view
     var mode = rt.route_mode || 'direct';
-    var modeLabel = mode === 'middle' ? 'Middle-End (ME)' : 'Direct DC';
-    var meRdy = rt.me_runtime_ready
-        ? '<span class="badge badge-ok" title="Middle-End proxy pool is active and connected to Telegram DCs. Media/CDN traffic routes through ME.">ME: Ready</span>'
-        : '<span class="badge badge-gray" title="Middle-End Proxy is disabled. Traffic goes directly to Telegram DCs. Enable ME in Advanced if behind NAT.">ME: Off</span>';
     var _meWr = (st && st.me_writers && Array.isArray(st.me_writers.writers)) ? st.me_writers.writers : [];
     var _hasDegraded = _meWr.some(function(w){ return w && w.degraded; });
-    // ME writer pool health badge — only meaningful when ME is active
+    var egress = computeEgress(upData);
+
+    // TG PATH badge
+    var tgPath, tgPathCls;
+    if (rt.me_runtime_ready) { tgPath = 'ME'; tgPathCls = 'badge-ok'; }
+    else if (uciMpEnabled && !rt.me_runtime_ready) { tgPath = 'Fallback'; tgPathCls = 'badge-warn'; }
+    else { tgPath = 'Direct-DC'; tgPathCls = 'badge-info'; }
+    var tgPathBadge = '<span class="badge ' + tgPathCls + '" title="Telegram transport path: how traffic reaches Telegram DCs. ME = Middle-End pool, Direct-DC = TCP to DC, Fallback = ME configured but not ready.">TG Path: ' + tgPath + '</span>';
+
+    // EGRESS badge
+    var egressCls = egress.type === 'Direct' ? 'badge-info' : 'badge-ok';
+    var egressBadge = '<span class="badge ' + egressCls + '" title="Outbound egress method from proxy to Internet. Direct = no upstream proxy, SOCKS4/5 = via upstream.">Egress: ' + egress.type + '</span>';
+
+    // Accepting badge
+    var acc = rt.accepting_new_connections
+        ? '<span class="badge badge-ok" title="Proxy is accepting new client connections normally.">Accepting</span>'
+        : '<span class="badge badge-err" title="Proxy is NOT accepting new connections! Check logs.">Rejecting!</span>';
+
+    // ME badge
+    var meRdy = rt.me_runtime_ready
+        ? '<span class="badge badge-ok" title="Middle-End proxy pool active. Media/CDN routes through ME.">ME: Ready</span>'
+        : '<span class="badge badge-gray" title="Middle-End disabled. Traffic goes directly to DCs.">ME: Off</span>';
+
+    // ME writer pool badge (only when ME active)
     var meWriterBadge = '';
     if (mode === 'middle' && _meWr.length > 0) {
         var _wrAlive = _meWr.filter(function(w){ return w && !w.degraded; }).length;
         var _wrCls = _wrAlive === _meWr.length ? 'badge-ok' : (_wrAlive > 0 ? 'badge-warn' : 'badge-err');
         var _wrPct = Math.round(_wrAlive / _meWr.length * 100);
-        meWriterBadge = '<span class="badge ' + _wrCls + '" title="ME writer pool: alive writers / total (' + _wrPct + '%)">Writers: ' + _wrAlive + '/' + _meWr.length + '</span>';
+        meWriterBadge = '<span class="badge ' + _wrCls + '" title="ME writer pool health: alive / total (' + _wrPct + '%)">Writers: ' + _wrAlive + '/' + _meWr.length + '</span>';
     }
-    var fb = _hasDegraded
-        ? '<span class="badge badge-err" title="Some ME endpoints failed. Traffic is falling back to Direct DC connections. Check DC table for details.">Fallback: Active</span>'
-        : '<span class="badge badge-ok" title="All ME endpoints healthy. No degradation, traffic routing normally through the ME pool.">Fallback: Off</span>';
-    var rroute = rt.reroute_active
-        ? '<span class="badge badge-err" title="Traffic is being actively rerouted to alternative DCs due to failures. Performance may be degraded.">Reroute: On</span>'
-        : '<span class="badge badge-ok" title="No rerouting active. All traffic flows through primary routes.">Reroute: Off</span>';
-    var acc = rt.accepting_new_connections
-        ? '<span class="badge badge-ok" title="Proxy is accepting new client connections. Clients can connect and use the service normally.">Accepting</span>'
-        : '<span class="badge badge-err" title="Proxy is NOT accepting new connections! Existing clients may work, but new ones will be rejected. Check logs for errors.">Rejecting!</span>';
 
+    // Conditional badges: show only when active
+    var fb = _hasDegraded
+        ? '<span class="badge badge-err" title="ME endpoints failed, falling back to Direct-DC.">Fallback: Active</span>' : '';
+    var rroute = rt.reroute_active
+        ? '<span class="badge badge-err" title="Traffic rerouted to alternative DCs due to failures.">Reroute: On</span>' : '';
+
+    // Upstream health badge
+    var upBadge = '';
+    if (egress.total > 0) {
+        var _upCls = egress.ok === egress.total ? 'badge-ok' : (egress.ok > 0 ? 'badge-warn' : 'badge-err');
+        upBadge = '<span class="badge ' + _upCls + '" title="Upstream proxy health: healthy / configured.">Upstream: ' + egress.ok + '/' + egress.total + ' OK</span>';
+    }
+
+    // DC count badge (ME mode only)
     var dcsCount = 0;
     if (st && st.dcs && typeof st.dcs === 'object' && Array.isArray(st.dcs.dcs)) { dcsCount = st.dcs.dcs.length; }
     else if (st && Array.isArray(st.dcs)) { dcsCount = st.dcs.length; }
-    // In Direct mode show upstream health instead of a redundant "Direct DC" badge (Mode badge already says that).
-    // In ME mode show the DC pool count.
-    var dcsBadge = '';
-    if (mode === 'direct') {
-        var _upsForBadge = (upData && upData.ok && upData.data && Array.isArray(upData.data.upstreams)) ? upData.data.upstreams : null;
-        if (_upsForBadge && _upsForBadge.length > 0) {
-            var _upOk = _upsForBadge.filter(function(u){ return u && u.healthy; }).length;
-            var _upCls = _upOk === _upsForBadge.length ? 'badge-ok' : (_upOk > 0 ? 'badge-warn' : 'badge-err');
-            dcsBadge = '<span class="badge ' + _upCls + '" title="Upstream proxy health (healthy/total)">Upstream: ' + _upOk + '/' + _upsForBadge.length + ' OK</span>';
-        }
-    } else {
-        dcsBadge = '<span class="badge ' + (dcsCount > 0 ? 'badge-ok' : 'badge-gray') + '" title="Telegram DCs in ME pool">DCs: ' + dcsCount + '</span>';
-    }
+    var dcsBadge = (mode === 'middle' && dcsCount > 0) ? '<span class="badge badge-ok" title="Telegram DCs in ME pool.">DCs: ' + dcsCount + '</span>' : '';
 
+    // Network path badge
     var npBadge = '';
     if (st && Array.isArray(st.network_path) && st.network_path.length > 0) {
-        npBadge = '<span class="badge badge-ok" title="Upstream proxy chain hops">Upstream: ' + st.network_path.length + ' hop(s)</span>';
+        npBadge = '<span class="badge badge-ok" title="Upstream proxy chain hops.">Hops: ' + st.network_path.length + '</span>';
     }
 
-    if(dg) dg.innerHTML =
-        '<span class="badge ' + (mode === 'middle' ? 'badge-ok' : 'badge-info') + '" title="Current routing mode: how traffic reaches Telegram DCs">Mode: ' + escHTML(modeLabel) + '</span>' +
-        acc + meRdy + meWriterBadge + fb + rroute + dcsBadge + npBadge + promBadges;
+    // Assemble badge row
+    if(dg) dg.innerHTML = tgPathBadge + acc + egressBadge + meRdy + meWriterBadge + upBadge + dcsBadge + npBadge + fb + rroute + promBadges;
 
     if (dUp) {
         var upRendered = false;
@@ -1371,6 +1412,10 @@ function renderHealthGrid(apiData, promText, upData) {
     }
 
     if (dDc) {
+        // Dynamic card title
+        var dcTitle = document.getElementById('diag_dcs_title');
+        if (dcTitle) dcTitle.textContent = (mode === 'middle') ? 'Datacenters (ME)' : 'Telegram Path';
+
         var dcs = [];
         if (st && Array.isArray(st.dcs)) {
             dcs = st.dcs;
@@ -1381,6 +1426,7 @@ function renderHealthGrid(apiData, promText, upData) {
         }
 
         if (dcs.length > 0) {
+            // Mode A: ME active with DC table
             var dHtml = '<div style="display:flex; justify-content:space-between; font-weight:bold; color:#888; border-bottom:1px solid rgba(128,128,128,0.3); padding-bottom:4px; margin-bottom:4px;"><div style="flex:1">DC ID</div><div style="flex:0 0 100px; text-align:right;">Writers (A/R)</div><div style="flex:0 0 70px; text-align:right;">Coverage</div><div style="flex:0 0 60px; text-align:right;">RTT</div></div>';
             for (var k=0; k<dcs.length; k++) {
                 var dc = dcs[k] || {};
@@ -1389,34 +1435,20 @@ function renderHealthGrid(apiData, promText, upData) {
                 dHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1">DC ' + escHTML(String(dc.dc || '-')) + '</div><div style="flex:0 0 100px; text-align:right;">' + (dc.alive_writers || 0) + ' / ' + (dc.required_writers || 0) + '</div><div style="flex:0 0 70px; text-align:right;">' + covCol + '</div><div style="flex:0 0 60px; text-align:right;">' + (dc.rtt_ema_ms || 0) + 'ms</div></div>';
             }
             dDc.innerHTML = dHtml;
-        } else if (rt && typeof rt.direct_dcs === 'object' && Object.keys(rt.direct_dcs).length > 0) {
-            var directHtml = '<div style="display:flex; justify-content:space-between; font-weight:bold; color:#888; border-bottom:1px solid rgba(128,128,128,0.3); padding-bottom:4px; margin-bottom:4px;"><div style="flex:1">DC ID</div><div style="flex:0 0 100px; text-align:right;">Mode</div><div style="flex:0 0 70px; text-align:right;">Status</div><div style="flex:0 0 60px; text-align:right;">RTT</div></div>';
-            var dkeys = Object.keys(rt.direct_dcs);
-            for (var dk=0; dk<dkeys.length; dk++) {
-                var dcid = dkeys[dk];
-                var dinfo = rt.direct_dcs[dcid];
-                var drtt = dinfo.rtt_ms || 0;
-                var mode = dinfo.mode || 'DIRECT';
-                var dstat = drtt > 0 ? '<span style="color:#00a000">OK</span>' : '<span style="color:#888">Wait</span>';
-                directHtml += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed rgba(128,128,128,0.15);"><div style="flex:1">DC ' + escHTML(String(dcid)) + '</div><div style="flex:0 0 100px; text-align:right;">' + escHTML(String(mode)) + '</div><div style="flex:0 0 70px; text-align:right;">' + dstat + '</div><div style="flex:0 0 60px; text-align:right;">' + drtt + 'ms</div></div>';
-            }
-            dDc.innerHTML = directHtml;
         } else if (rt && rt.me_runtime_ready) {
-            dDc.innerHTML = '<div style="text-align:center; color:#d35400; padding:10px;">Waiting for DC connections...</div>';
-        } else if (mode === 'direct') {
-            // Direct mode: /v1/stats/dcs always returns reason:"source_unavailable" — show informational message.
-            dDc.innerHTML = '<div style="color:#0069d6; padding:10px;">' +
-                '<b>Direct DC mode</b><br>' +
-                '<span style="font-size:0.9em; color:#555;">The binary connects to Telegram DCs on demand per session. ' +
-                'No persistent DC pool is maintained. DC reachability is checked at handshake time.</span>' +
-                '<div style="margin-top:8px; font-size:0.9em;">' +
-                '<b>Active connects:</b> ' + promUpActive + ' &nbsp;|&nbsp; <b>Fails:</b> ' + promUpFails +
-                (_upSuccessRate ? ' &nbsp;|&nbsp; <b>Success:</b> ' + _upSuccessRate : '') +
-                '</div></div>';
-        } else if (parsed.reason === 'source_unavailable') {
-            dDc.innerHTML = '<div style="color:#888; padding:10px;">DC detailed stats unavailable.</div>';
+            dDc.innerHTML = '<div style="text-align:center; color:#d35400; padding:10px;">ME initializing, waiting for DC connections...</div>';
         } else {
-            dDc.innerHTML = '<div style="text-align:center; color:#888; padding:10px;">DC list empty or proxy disabled</div>';
+            // Mode B: Direct-DC path (possibly via upstream)
+            var pathParts = [];
+            pathParts.push('<b>TG Path:</b> Direct-DC' + (egress.type !== 'Direct' ? ' over ' + egress.type : ''));
+            if (egress.total > 0) {
+                pathParts.push('<b>Upstream:</b> ' + egress.ok + '/' + egress.total + ' healthy');
+            }
+            pathParts.push('<b>Active connects:</b> ' + promUpActive + ' &nbsp;|&nbsp; <b>Fails:</b> ' + promUpFails + (_upSuccessRate ? ' &nbsp;|&nbsp; <b>Success:</b> ' + _upSuccessRate : ''));
+            if (uciMpEnabled) {
+                pathParts.push('<span style="color:#d35400;">ME is configured but not ready. Traffic uses Direct-DC as fallback.</span>');
+            }
+            dDc.innerHTML = '<div style="color:#555; padding:10px; line-height:1.8;">' + pathParts.join('<br>') + '</div>';
         }
     }
 }
@@ -1506,7 +1538,7 @@ function fetchMetrics() {
         }
 
         var userStats = {}; var allUserRows = document.querySelectorAll('.user-flat-stat');
-        allUserRows.forEach(function(statEl) { var u = statEl.getAttribute('data-user'); if(u) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0 }; });
+        allUserRows.forEach(function(statEl) { var u = statEl.getAttribute('data-user'); if(u) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0, ips: 0, ips_limit: 0 }; });
 
         var globalStatsObj = { uptime: 0 }; var totalLiveRx = 0, totalLiveTx = 0, totalAccRx = 0, totalAccTx = 0;
         var lines = promText.split('\n');
@@ -1515,13 +1547,15 @@ function fetchMetrics() {
             if (/^telemt_uptime_seconds(\s|$)/.test(line)) { var m = line.match(/\s+([0-9\.eE\+\-]+)/); if(m) globalStatsObj.uptime = parseFloat(m[1]); continue; }
             var userMatch = line.match(/user="([^"]+)"/);
             if (userMatch) {
-                var u = userMatch[1]; if (!userStats[u]) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0 };
+                var u = userMatch[1]; if (!userStats[u]) userStats[u] = { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0, ips: 0, ips_limit: 0 };
                 var valMatch = line.match(/\}\s+([0-9\.eE\+\-]+)/);
                 if (valMatch) {
                     var val = parseFloat(valMatch[1]);
                     if (line.indexOf('telemt_user_octets_from_client') > -1) { userStats[u].live_rx = val; totalLiveRx += val; }
                     else if (line.indexOf('telemt_user_octets_to_client') > -1) { userStats[u].live_tx = val; totalLiveTx += val; }
                     else if (line.indexOf('telemt_user_connections_current') > -1) { userStats[u].conns = val; }
+                    else if (line.indexOf('telemt_user_unique_ips_current') > -1) { userStats[u].ips = val; }
+                    else if (line.indexOf('telemt_user_unique_ips_limit') > -1) { userStats[u].ips_limit = val; }
                     else if (line.indexOf('telemt_accumulated_rx') > -1) { userStats[u].acc_rx = val; totalAccRx += val; }
                     else if (line.indexOf('telemt_accumulated_tx') > -1) { userStats[u].acc_tx = val; totalAccTx += val; }
                 }
@@ -1533,7 +1567,7 @@ function fetchMetrics() {
         var totalConfiguredUsers = allUserRows.length; var usersOnline = 0;
 
         allUserRows.forEach(function(statEl) {
-            var u = statEl.getAttribute('data-user'); var stat = userStats[u] || { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0 };
+            var u = statEl.getAttribute('data-user'); var stat = userStats[u] || { live_rx: 0, live_tx: 0, acc_rx: 0, acc_tx: 0, conns: 0, ips: 0, ips_limit: 0 };
             var finalTx = stat.live_tx + stat.acc_tx; var finalRx = stat.live_rx + stat.acc_rx; if (stat.conns > 0) usersOnline++;
 
             var qStr = statEl.getAttribute('data-q'); var eStr = statEl.getAttribute('data-e'); var isEn = statEl.getAttribute('data-en');
@@ -1550,7 +1584,17 @@ function fetchMetrics() {
 
             var c_col = stat.conns > 0 ? "#00a000" : "#888";
             var dotUser = "<svg width='10' height='10' style='vertical-align:middle;'><circle cx='5' cy='5' r='5' fill='" + c_col + "'/></svg>";
-            var statHtml = "<div style='display:flex; align-items:center; gap:4px; margin-bottom:2px; flex-wrap:wrap;'><span style='color:#00a000;' title='Total Download (Live + Accumulated)'>&darr; " + formatMB(finalTx) + "</span> <span class='stat-divider'>/</span> <span style='color:#d35400;' title='Total Upload (Live + Accumulated)'>&uarr; " + formatMB(finalRx) + "</span> <span class='stat-divider'>|</span> <span style='color:" + c_col + ";' title='Active TCP Connections'>" + dotUser + "&nbsp;" + stat.conns + "</span></div>";
+            var ipStr = '';
+            if (stat.ips > 0 || stat.ips_limit > 0) {
+                var ip_col = '#555';
+                if (stat.ips_limit > 0) {
+                    ip_col = (stat.ips >= stat.ips_limit) ? '#d9534f' : '#555';
+                    ipStr = " <span style='color:" + ip_col + ";margin-left:3px;' title='Unique IPs / Limit'>IP " + stat.ips + "/" + stat.ips_limit + "</span>";
+                } else {
+                    ipStr = " <span style='color:#555;margin-left:3px;' title='Unique active IPs'>IP " + stat.ips + "</span>";
+                }
+            }
+            var statHtml = "<div style='display:flex; align-items:center; gap:4px; margin-bottom:2px; flex-wrap:wrap;'><span style='color:#00a000;' title='Total Download (Live + Accumulated)'>&darr; " + formatMB(finalTx) + "</span> <span class='stat-divider'>/</span> <span style='color:#d35400;' title='Total Upload (Live + Accumulated)'>&uarr; " + formatMB(finalRx) + "</span> <span class='stat-divider'>|</span> <span style='color:" + c_col + ";' title='Active TCP connections'>" + dotUser + "&nbsp;" + stat.conns + "</span>" + ipStr + "</div>";
             if (isOffline) { statEl.innerHTML = "<div style='opacity: 0.6; filter: grayscale(1);' title='Daemon is offline, showing accumulated stats'>" + statHtml + "</div>"; return; }
             statEl.innerHTML = statHtml;
         });
@@ -1561,16 +1605,12 @@ function fetchMetrics() {
 
         var sumEl = document.getElementById('telemt_users_summary_inner');
         if (sumEl && !isOffline) {
-            var statStr = "<b style='margin-right:6px;'>Uptime:</b><span style='color:#666;'>" + formatUptime(globalStatsObj.uptime) + "</span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Bandwidth:</b> <span style='color:#00a000;'>&darr; " + speedDL.toFixed(2) + "</span> <span style='color:#d35400; margin-left:4px;'>&uarr; " + speedUL.toFixed(2) + "</span> <small>Mbps</small></span><span class='sum-divider'>|</span><span><b style='color:#555;'>Users Online:</b> <b style='color:#00a000; margin-left:4px;'>" + usersOnline + "</b><span style='margin:0 4px;'>/</span>" + totalConfiguredUsers + "</span>";
-
-            var parsed = parseApiResponse(apiData);
-            var rMode = "Unknown (API Req)", meReady = "<span style='color:#888'>N/A</span>";
-
-            if (parsed.ok && parsed.runtime) {
-                rMode = parsed.runtime.route_mode || "direct";
-                meReady = parsed.runtime.me_runtime_ready ? "<span style='color:#00a000'>Ready</span>" : "<span style='color:#888'>Disabled</span>";
-            }
-            sumEl.innerHTML = statStr + "<div style='margin-top:6px; padding-top:6px; border-top:1px dashed #ccc; font-size:0.9em;'><b>Live Routing:</b> " + escHTML(rMode) + " <span class='sum-divider'>|</span> <b>ME Status:</b> " + meReady + "</div>";
+            var statStr = "<div class='sum-row'><b>Uptime:</b> <span style='color:#666;'>" + formatUptime(globalStatsObj.uptime) + "</span></div>" +
+                "<div class='sum-row'><b style='color:#555;'>Total DL:</b> <span style='color:#00a000;'>&darr; " + formatMB(totalTx) + "</span></div>" +
+                "<div class='sum-row'><b style='color:#555;'>Total UL:</b> <span style='color:#d35400;'>&uarr; " + formatMB(totalRx) + "</span></div>" +
+                "<div class='sum-row'><b style='color:#555;'>BW:</b> <span style='color:#00a000;'>&darr; " + speedDL.toFixed(2) + "</span> <span style='color:#d35400;'>&uarr; " + speedUL.toFixed(2) + "</span> <small>Mbps</small></div>" +
+                "<div class='sum-row'><b style='color:#555;'>Online:</b> <b style='color:#00a000;'>" + usersOnline + "</b> / " + totalConfiguredUsers + "</div>";
+            sumEl.innerHTML = statStr;
         }
 
         if (document.getElementById('diag_gates') && !isOffline) {
@@ -1660,6 +1700,51 @@ function loadScanners() {
         document.getElementById('telemt_log_container').textContent = 'Error fetching scanners data.';
         btn.value = 'Error';
     }).finally(() => { btn.disabled = false; });
+}
+
+function loadRuntimeInfo() {
+    var btn = document.getElementById('btn_runtime_info'); if(!btn) return;
+    var logEl = document.getElementById('telemt_log_container'); if(!logEl) return;
+    btn.value = 'Loading...'; btn.disabled = true;
+    var out = '=== [ RUNTIME INFO ] ===\n\n';
+    // Fetch minimal/all and upstreams in parallel
+    var baseUrl = lu_current_url.split('#')[0];
+    var sep = (baseUrl.indexOf('?') > -1) ? '&' : '?';
+    Promise.all([
+        fetch(baseUrl + sep + 'get_metrics=1&_t=' + Date.now()).then(function(r){ return r.text(); }).catch(function(){ return ''; })
+    ]).then(function(results) {
+        var raw = results[0] || '';
+        // Extract API JSON sections
+        var apiParts = raw.split('---TELEMT_API_JSON---');
+        var apiJson = '{}', upJson = '{}';
+        if (apiParts.length > 1) {
+            var rest = apiParts[1];
+            var upParts = rest.split('---TELEMT_UPSTREAMS_JSON---');
+            apiJson = (upParts[0] || '{}').trim();
+            upJson = (upParts[1] || '{}').replace(/<(!DOCTYPE|html[\s>]).*$/is, '').trim();
+        }
+        out += '--- /v1/stats/minimal/all ---\n';
+        try { out += JSON.stringify(JSON.parse(apiJson), null, 2); } catch(e) { out += apiJson; }
+        out += '\n\n--- /v1/stats/upstreams ---\n';
+        try { out += JSON.stringify(JSON.parse(upJson), null, 2); } catch(e) { out += upJson; }
+        // Extract key Prometheus counters
+        out += '\n\n--- Prometheus Summary ---\n';
+        var keys = ['telemt_uptime_seconds', 'telemt_connections_total', 'telemt_connections_bad_total',
+            'telemt_upstream_connect_attempt_total', 'telemt_upstream_connect_success_total',
+            'telemt_upstream_connect_fail_total', 'telemt_desync_total',
+            'telemt_me_reconnect_attempts_total', 'telemt_me_reconnect_success_total'];
+        var promPart = apiParts[0] || raw;
+        for (var ki = 0; ki < keys.length; ki++) {
+            var re = new RegExp(keys[ki] + '\\s+([0-9\\.eE\\+\\-]+)');
+            var mv = promPart.match(re);
+            if (mv) out += keys[ki] + ' = ' + mv[1] + '\n';
+        }
+        logEl.textContent = out;
+        btn.value = 'Refresh Info';
+    }).catch(function() {
+        logEl.textContent = out + 'Error fetching runtime data.';
+        btn.value = 'Error';
+    }).finally(function() { btn.disabled = false; });
 }
 
 function copyLogContent(btn) {

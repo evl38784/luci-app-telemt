@@ -952,7 +952,7 @@ bot_dash.default = string.format([[
 -- === TAB: DIAGNOSTICS ===
 local diag = s:taboption("log", DummyValue, "_diag")
 diag.rawhtml = true
-diag.default = [[
+diag.default = [=[
 <div class="telemt-panel" style="display:block; width:100% !important; max-width:none !important; clear:both; box-sizing:border-box;">
     <div id="telemt_health_summary" style="margin-bottom:20px;">
         <h3 style="margin-top:0; border-bottom:2px solid var(--border-color, #ccc); padding-bottom:5px;">Health Summary</h3>
@@ -961,7 +961,6 @@ diag.default = [[
             <span style="color:#888;">Fetching Runtime Status...</span>
         </div>
 
-        <!-- Live connections counter (updated from Prometheus on each poll) -->
         <div id="diag_live_conns" style="margin-bottom:12px; padding:8px 12px; background:rgba(0,160,0,0.05); border:1px solid rgba(0,160,0,0.15); border-radius:5px; font-size:0.95em; display:none;"></div>
 
         <div style="display:flex; flex-wrap:wrap; gap:15px; width:100%;">
@@ -1027,7 +1026,7 @@ setTimeout(function(){
     });
 }, 500);
 </script>
-]]
+]=]
 
 -- === TAB: USERS ===
 local anchor = s:taboption("users", DummyValue, "_users_anchor", ""); anchor.rawhtml = true; anchor.default =
@@ -1093,7 +1092,7 @@ local lnk = s2:option(DummyValue, "_link", "Ready-to-use link" .. tip("Click the
     [[<div class="link-wrapper"><input type="text" class="cbi-input-text user-link-out" readonly onclick="this.select()"></div>]]
 end
 
-m.description = [[
+m.description = [=[
 <style>
 .cbi-value-helpicon, img[src*="help.gif"], img[src*="help.png"], .cbi-tooltip-container, .cbi-tooltip { display: none !important; }
 .cbi-value-description::before, .cbi-value-description img { display: none !important; content: none !important; margin: 0 !important; padding: 0 !important; width: 0 !important; height: 0 !important; }
@@ -1167,8 +1166,8 @@ div[id^="cbi-telemt-advanced-_head_adv"] .cbi-value-field, div[id^="cbi-telemt-a
 </style>
 
 <script type="text/javascript">
-var lu_current_url = "]] .. safe_url .. [[";
-var is_owrt25 = ]] .. is_owrt25_lua .. [[;
+var lu_current_url = "]=] .. safe_url .. [=[";
+var is_owrt25 = ]=] .. is_owrt25_lua .. [=[;
 
 function logAction(msg, data) { console.log("[Telemt UI] " + msg); }
 function escHTML(s) { return String(s).replace(/[&<>'"]/g, function(c) { return '&#' + c.charCodeAt(0) + ';'; }); }
@@ -2035,9 +2034,9 @@ function closeModals() { document.querySelectorAll('.qr-modal-overlay').forEach(
 function showQRModal(link) { if (!link || link.indexOf('Error') === 0) return; var overlay = document.getElementById('qr-modal'); if (!overlay) { overlay = document.createElement('div'); overlay.id = 'qr-modal'; overlay.className = 'qr-modal-overlay'; var content = document.createElement('div'); content.className = 'custom-modal-content'; var body = document.createElement('div'); body.id = 'qr-modal-body'; content.appendChild(body); var clsBtn = document.createElement('button'); clsBtn.className = 'cbi-button cbi-button-reset'; clsBtn.style.cssText = 'margin-top:15px; width:100%;'; clsBtn.innerText = 'Close'; clsBtn.addEventListener('click', closeModals); content.appendChild(clsBtn); overlay.appendChild(content); document.body.appendChild(overlay); overlay.addEventListener('click', function(e) { if (e.target === overlay) closeModals(); }); } var body = document.getElementById('qr-modal-body'); body.innerHTML = 'Generating...'; overlay.classList.add('active'); document.body.classList.add('qr-modal-open'); fetch(lu_current_url.split('#')[0] + (lu_current_url.indexOf('?') > -1 ? '&' : '?') + 'get_qr=1&link=' + encodeURIComponent(link) + '&_t=' + Date.now()).then(r => r.text()).then(txt => { txt = cleanResponse(txt); if (txt.indexOf('error: qrencode_missing') > -1) body.innerHTML = '<div style="color:#d9534f; font-weight:bold; margin-bottom:10px;">Install qrencode</div>'; else if (txt.indexOf('error: invalid_link') > -1) body.innerHTML = '<div style="color:#d9534f; font-weight:bold;">Invalid Link Format</div>'; else { var svgMatch = txt.match(/<svg[\s\S]*?<\/svg>/i); body.innerHTML = svgMatch ? svgMatch[0] : 'Error'; } }).catch(() => { body.innerHTML = 'Connection error.'; }); }
 
 function doExportStats() { if (!window._telemtLastStats) { alert("Live stats not loaded yet. Wait a few seconds."); return; } logAction("Exporting Live Stats to CSV"); var csv = "username,total_dl_bytes,total_ul_bytes,active_connections\n"; var grandTx = 0, grandRx = 0, grandConns = 0; for (var u in window._telemtLastStats) { if (window._telemtLastStats.hasOwnProperty(u)) { var s = window._telemtLastStats[u]; var tx = (s.live_tx || 0) + (s.acc_tx || 0); var rx = (s.live_rx || 0) + (s.acc_rx || 0); var c = (s.conns || 0); csv += u + "," + tx + "," + rx + "," + c + "\n"; grandTx += tx; grandRx += rx; grandConns += c; } } csv += "TOTAL_ALL_USERS," + grandTx + "," + grandRx + "," + grandConns + "\n"; var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); var link = document.createElement("a"); link.setAttribute("href", URL.createObjectURL(blob)); link.setAttribute("download", "telemt_traffic_stats.csv"); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
-function doExportCSV() { logAction("Exporting Users to CSV"); var blob = new Blob(["]] ..
+function doExportCSV() { logAction("Exporting Users to CSV"); var blob = new Blob(["]=] ..
     clean_csv ..
-    [["], { type: 'text/csv;charset=utf-8;' }); var link = document.createElement("a"); link.setAttribute("href", URL.createObjectURL(blob)); link.setAttribute("download", "telemt_users.csv"); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
+    [=["], { type: 'text/csv;charset=utf-8;' }); var link = document.createElement("a"); link.setAttribute("href", URL.createObjectURL(blob)); link.setAttribute("download", "telemt_users.csv"); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
 function readCSVFile(input) { var file = input.files[0]; var displaySpan = document.getElementById('csv_file_name_display'); if (!file) { displaySpan.innerText = "No file selected"; return; } displaySpan.innerText = file.name; var reader = new FileReader(); reader.onload = function(e) { document.getElementById('csv_text_area').value = e.target.result; }; reader.readAsText(file); }
 
 function submitImport() {
@@ -2234,6 +2233,6 @@ function initTelemt() {
 }
 if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', initTelemt); } else { initTelemt(); }
 </script>
-]] .. (m.description or "")
+]=] .. (m.description or "")
 
 return m

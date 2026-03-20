@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Package version (e.g. 3.3.16-11 or 3.3.16)'
+        description: 'Package version (e.g. 3.3.XX-11 or 3.3.XX)'
         required: true
-        default: '3.3.16-11'
+        default: '3.3.22'
 
 jobs:
   release:

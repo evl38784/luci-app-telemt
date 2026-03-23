@@ -47,7 +47,6 @@ define Package/luci-app-telemt/description
 endef
 
 define Package/luci-app-telemt/install
-	# Копируем всё дерево usr/ → /usr/ (Lua, bin, share, lib)
 	$(CP) $(PKG_BUILD_DIR)/usr/. $(1)/usr/
 endef
 
